@@ -1,6 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const protobuf = require("protobufjs");
 
 const app = express();
 
@@ -8,6 +7,10 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
+
+/* =========================================================
+   DEMO TITLES
+========================================================= */
 
 const titles = [
   {
@@ -55,9 +58,9 @@ const demoPages = [
   "https://images.unsplash.com/photo-1512820790803-83ca734da794?w=1200"
 ];
 
-/* =========================
+/* =========================================================
    BASIC API
-========================= */
+========================================================= */
 
 app.get("/", (req, res) => {
   res.json({
@@ -73,6 +76,10 @@ app.get("/api/health", (req, res) => {
     service: "Zyomira backend"
   });
 });
+
+/* =========================================================
+   SEARCH
+========================================================= */
 
 app.get("/api/search", (req, res) => {
   const query = String(req.query.q || "")
@@ -98,6 +105,10 @@ app.get("/api/search", (req, res) => {
   });
 });
 
+/* =========================================================
+   TITLE
+========================================================= */
+
 app.get("/api/title/:id", (req, res) => {
   const item = titles.find(
     title => title.id === req.params.id
@@ -111,6 +122,10 @@ app.get("/api/title/:id", (req, res) => {
 
   res.json(item);
 });
+
+/* =========================================================
+   CHAPTERS
+========================================================= */
 
 app.get("/api/title/:id/chapters", (req, res) => {
   const item = titles.find(
@@ -139,6 +154,10 @@ app.get("/api/title/:id/chapters", (req, res) => {
   });
 });
 
+/* =========================================================
+   READER
+========================================================= */
+
 app.get(
   "/api/title/:id/chapter/:chapter",
   (req, res) => {
@@ -152,7 +171,8 @@ app.get(
       });
     }
 
-    const chapterNumber = Number(req.params.chapter);
+    const chapterNumber =
+      Number(req.params.chapter);
 
     if (
       !Number.isInteger(chapterNumber) ||
@@ -176,24 +196,26 @@ app.get(
   }
 );
 
-/* =========================
-   REPOSITORY FETCHER
-========================= */
+/* =========================================================
+   REMOTE FETCH
+========================================================= */
 
 async function fetchBuffer(url) {
   const response = await fetch(url, {
     headers: {
-      "User-Agent": "Zyomira/1.1"
+      "User-Agent": "Zyomira/1.2"
     }
   });
 
   if (!response.ok) {
     throw new Error(
-      `Repository returned HTTP ${response.status}`
+      `Remote server returned HTTP ${response.status}`
     );
   }
 
-  return Buffer.from(await response.arrayBuffer());
+  return Buffer.from(
+    await response.arrayBuffer()
+  );
 }
 
 async function fetchText(url) {
@@ -201,64 +223,74 @@ async function fetchText(url) {
   return buffer.toString("utf8");
 }
 
-/* =========================
-   URL NORMALIZATION
-========================= */
+/* =========================================================
+   URL HELPERS
+========================================================= */
 
-function githubRawUrl(url) {
+function normalizeGitHubUrl(url) {
   try {
     const parsed = new URL(url);
 
     if (parsed.hostname !== "github.com") {
-      return null;
+      return url;
     }
 
     const parts = parsed.pathname
       .split("/")
       .filter(Boolean);
 
-    /*
-      github.com/user/repo/raw/branch/file
-    */
+    const rawIndex =
+      parts.indexOf("raw");
 
-    const rawIndex = parts.indexOf("raw");
-
-    if (rawIndex !== -1 && parts.length > rawIndex + 2) {
+    if (
+      rawIndex !== -1 &&
+      parts.length > rawIndex + 2
+    ) {
+      const owner = parts[0];
+      const repo = parts[1];
       const branch = parts[rawIndex + 1];
 
       const file = parts
         .slice(rawIndex + 2)
         .join("/");
 
-      return `https://raw.githubusercontent.com/${parts[0]}/${parts[1]}/${branch}/${file}`;
+      return (
+        `https://raw.githubusercontent.com/` +
+        `${owner}/${repo}/${branch}/${file}`
+      );
     }
 
-    return null;
+    return url;
   } catch {
-    return null;
+    return url;
   }
 }
 
-/*
-  If user gives:
-  github.com/keiyoushi/extensions/raw/repo/index.pb
-
-  keep it as-is.
-
-  If user gives a GitHub normal URL, try raw conversion.
-*/
-
 function normalizeRepoUrl(url) {
-  const raw = githubRawUrl(url);
-
-  return raw || url;
+  return normalizeGitHubUrl(url);
 }
 
-/* =========================
-   REPO.JSON
-========================= */
+function absoluteUrl(value, baseUrl) {
+  if (!value) return "";
 
-async function readRepoJson(url) {
+  try {
+    return new URL(
+      value,
+      baseUrl
+    ).href;
+  } catch {
+    return String(value);
+  }
+}
+
+/* =========================================================
+   JSON REPOSITORY
+========================================================= */
+
+async function loadJsonIndex(
+  url,
+  meta = {}
+) {
   const text = await fetchText(url);
 
   let data;
@@ -266,376 +298,20 @@ async function readRepoJson(url) {
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error("repo.json is not valid JSON");
-  }
-
-  if (!data || typeof data !== "object") {
-    throw new Error("Invalid repository metadata");
-  }
-
-  return data;
-}
-
-/* =========================
-   PROTOBUF INDEX
-========================= */
-
-/*
-  Important:
-
-  Keiyoushi's index.pb is a protobuf binary index.
-  We intentionally do not execute extension code.
-
-  The backend first tries to locate the repository's
-  JSON index because the same repository publishes
-  machine-readable JSON metadata alongside index.pb.
-
-  This gives Zyomira compatibility without executing
-  arbitrary code from an external repository.
-*/
-
-async function loadProtobufRepository(url) {
-  const original = url;
-
-  /*
-    Try repo.json from the same GitHub repository.
-  */
-
-  let repoJsonUrl = null;
-
-  try {
-    const parsed = new URL(original);
-
-    if (
-      parsed.hostname === "raw.githubusercontent.com" &&
-      parsed.pathname.endsWith("/index.pb")
-    ) {
-      repoJsonUrl =
-        `${parsed.origin}` +
-        parsed.pathname
-          .replace(/\/index\.pb$/, "/repo.json");
-    }
-
-    if (
-      parsed.hostname === "github.com" &&
-      parsed.pathname.includes("/raw/")
-    ) {
-      const raw = normalizeRepoUrl(original);
-
-      if (raw) {
-        const rawParsed = new URL(raw);
-
-        repoJsonUrl =
-          `${rawParsed.origin}` +
-          rawParsed.pathname
-            .replace(/\/index\.pb$/, "/repo.json");
-      }
-    }
-  } catch {}
-
-  /*
-    If repo.json exists, use its index_v2 and metadata.
-  */
-
-  if (repoJsonUrl) {
-    try {
-      const repoData = await readRepoJson(repoJsonUrl);
-
-      if (repoData.index_v2) {
-        return await loadRepositoryIndex(
-          repoData.index_v2,
-          repoData.meta || {}
-        );
-      }
-    } catch {}
-  }
-
-  /*
-    Direct protobuf fallback.
-  */
-
-  const buffer = await fetchBuffer(original);
-
-  if (!buffer.length) {
-    throw new Error("Empty protobuf index");
-  }
-
-  /*
-    Decode protobuf wire format generically.
-
-    This lets us inspect strings and nested messages
-    without executing any extension code.
-  */
-
-  const strings = extractProtoStrings(buffer);
-
-  const extensions = stringsToExtensions(strings);
-
-  if (!extensions.length) {
     throw new Error(
-      "Protobuf index was downloaded but no compatible extension metadata was found"
+      "Repository index is not valid JSON"
     );
   }
 
-  return {
-    name: "Protobuf Repository",
-    format: "protobuf",
-    extensions
-  };
-}
-
-/* =========================
-   GENERIC PROTO STRING READER
-========================= */
-
-function readVarint(buffer, offset) {
-  let value = 0;
-  let shift = 0;
-  let position = offset;
-
-  while (position < buffer.length) {
-    const byte = buffer[position++];
-
-    value +=
-      (byte & 0x7f) *
-      Math.pow(2, shift);
-
-    if (!(byte & 0x80)) {
-      break;
-    }
-
-    shift += 7;
-
-    if (shift > 63) {
-      throw new Error("Invalid protobuf varint");
-    }
-  }
-
-  return {
-    value,
-    offset: position
-  };
-}
-
-function extractProtoStrings(buffer) {
-  const strings = [];
-
-  function scan(data, depth = 0) {
-    if (depth > 8) return;
-
-    let offset = 0;
-
-    while (offset < data.length) {
-      try {
-        const tag = readVarint(data, offset);
-        offset = tag.offset;
-
-        const wireType = tag.value & 7;
-
-        if (wireType === 0) {
-          const value = readVarint(data, offset);
-          offset = value.offset;
-          continue;
-        }
-
-        if (wireType === 1) {
-          offset += 8;
-          continue;
-        }
-
-        if (wireType === 2) {
-          const lengthInfo =
-            readVarint(data, offset);
-
-          offset = lengthInfo.offset;
-
-          const length =
-            Number(lengthInfo.value);
-
-          if (
-            length < 0 ||
-            offset + length > data.length
-          ) {
-            break;
-          }
-
-          const chunk =
-            data.subarray(
-              offset,
-              offset + length
-            );
-
-          offset += length;
-
-          const text =
-            chunk.toString("utf8");
-
-          if (isUsefulString(text)) {
-            strings.push(text);
-          }
-
-          /*
-            Nested protobuf message.
-          */
-
-          if (looksLikeProto(chunk)) {
-            scan(chunk, depth + 1);
-          }
-
-          continue;
-        }
-
-        if (wireType === 5) {
-          offset += 4;
-          continue;
-        }
-
-        break;
-      } catch {
-        break;
-      }
-    }
-  }
-
-  scan(buffer);
-
-  return [...new Set(strings)];
-}
-
-function isUsefulString(value) {
-  if (!value || value.length < 3) {
-    return false;
-  }
-
-  if (value.length > 1000) {
-    return false;
-  }
-
-  let printable = 0;
-
-  for (const char of value) {
-    const code = char.charCodeAt(0);
-
-    if (
-      code === 9 ||
-      code === 10 ||
-      code === 13 ||
-      (code >= 32 && code <= 126)
-    ) {
-      printable++;
-    }
-  }
-
-  return printable / value.length > 0.85;
-}
-
-function looksLikeProto(buffer) {
-  if (buffer.length < 2) return false;
-
-  const first = buffer[0];
-
-  /*
-    Typical protobuf field tags are small.
-  */
-
-  return first > 0 && first < 128;
-}
-
-/* =========================
-   STRING → EXTENSION METADATA
-========================= */
-
-function stringsToExtensions(strings) {
-  const urls = strings.filter(
-    value =>
-      value.startsWith("http://") ||
-      value.startsWith("https://")
-  );
-
-  const names = strings.filter(
-    value =>
-      !value.includes("://") &&
-      !value.includes("/") &&
-      value.length >= 3 &&
-      value.length <= 100
-  );
-
-  const results = [];
-
-  /*
-    We only expose metadata we can identify.
-    We do NOT execute the extension.
-  */
-
-  urls.forEach((url, index) => {
-    const domain = safeHostname(url);
-
-    if (!domain) return;
-
-    results.push({
-      id: `pb-${index}-${domain}`,
-      name: domain,
-      description:
-        "Source discovered from a Protocol Buffers repository index.",
-      type: "Manga",
-      lang: "",
-      url,
-      version: ""
-    });
-  });
-
-  /*
-    If URLs were not found, names can still help
-    confirm that the protobuf file was decoded.
-  */
-
-  if (!results.length && names.length) {
-    names.slice(0, 100).forEach((name, index) => {
-      results.push({
-        id: `pb-name-${index}-${name}`,
-        name,
-        description:
-          "Extension metadata discovered from protobuf index.",
-        type: "Manga",
-        lang: "",
-        url: "",
-        version: ""
-      });
-    });
-  }
-
-  return results.slice(0, 500);
-}
-
-function safeHostname(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-/* =========================
-   INDEX.JSON SUPPORT
-========================= */
-
-async function loadJsonIndex(url, meta = {}) {
-  const text = await fetchText(url);
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("Index is not valid JSON");
-  }
-
   const extensions =
-    extractJsonExtensions(data);
+    extractJsonExtensions(
+      data,
+      url
+    );
 
   if (!extensions.length) {
     throw new Error(
-      "JSON repository contains no compatible extensions"
+      "JSON repository contains no extensions"
     );
   }
 
@@ -645,122 +321,333 @@ async function loadJsonIndex(url, meta = {}) {
       data.name ||
       "JSON Repository",
 
+    website:
+      meta.website ||
+      data.website ||
+      "",
+
     format: "json",
 
     extensions
   };
 }
 
-function extractJsonExtensions(data) {
+/* =========================================================
+   JSON EXTENSION PARSER
+========================================================= */
+
+function extractJsonExtensions(
+  data,
+  repositoryUrl
+) {
+  let array = [];
+
   if (Array.isArray(data)) {
-    return normalizeExtensionArray(data);
-  }
+    array = data;
+  } else if (
+    data &&
+    typeof data === "object"
+  ) {
+    const candidates = [
+      data.extensions,
+      data.sources,
+      data.items,
+      data.entries,
+      data.plugins,
+      data.apps,
+      data.data
+    ];
 
-  if (!data || typeof data !== "object") {
-    return [];
-  }
-
-  const candidates = [
-    data.extensions,
-    data.sources,
-    data.items,
-    data.entries,
-    data.plugins,
-    data.apps,
-    data.data
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) {
-      const result =
-        normalizeExtensionArray(candidate);
-
-      if (result.length) {
-        return result;
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) {
+        array = candidate;
+        break;
       }
     }
   }
 
-  return [];
+  return normalizeExtensionArray(
+    array,
+    repositoryUrl
+  );
 }
 
-function normalizeExtensionArray(array) {
-  return array
+/* =========================================================
+   EXTENSION NORMALIZER
+
+   IMPORTANT:
+   Keiyoushi metadata looks like:
+
+   {
+     name,
+     pkg,
+     apk,
+     lang,
+     version,
+     sources: [
+       {
+         name,
+         lang,
+         id,
+         baseUrl
+       }
+     ]
+   }
+
+   We now extract BOTH:
+
+   Extension metadata
+   AND
+   nested source metadata.
+========================================================= */
+
+function normalizeExtensionArray(
+  array,
+  repositoryUrl
+) {
+  const extensions = [];
+  const sources = [];
+
+  array
     .filter(
       item =>
         item &&
         typeof item === "object"
     )
-    .map((item, index) => ({
-      id: String(
+    .forEach((item, index) => {
+      const extensionId = String(
         item.pkg ||
         item.package ||
         item.id ||
         `extension-${index}`
-      ),
+      );
 
-      name: String(
+      const extensionName = String(
         item.name ||
         item.title ||
         item.label ||
         item.pkg ||
         "Unnamed Extension"
-      ),
+      );
 
-      description: String(
-        item.description ||
-        item.summary ||
-        ""
-      ),
+      const extension = {
+        id: extensionId,
 
-      type: String(
-        item.type ||
-        item.category ||
-        "Manga"
-      ),
+        name: extensionName,
 
-      lang: String(
-        item.lang ||
-        item.language ||
-        ""
-      ),
+        description: String(
+          item.description ||
+          item.summary ||
+          ""
+        ),
 
-      url: String(
-        item.url ||
-        item.sourceUrl ||
-        item.website ||
-        ""
-      ),
+        type: String(
+          item.type ||
+          item.category ||
+          "Manga"
+        ),
 
-      icon: String(
-        item.icon ||
-        item.iconUrl ||
-        ""
-      ),
+        lang: String(
+          item.lang ||
+          item.language ||
+          ""
+        ),
 
-      version: String(
-        item.version ||
-        item.versionName ||
-        item.versionCode ||
-        ""
-      )
-    }));
-}
+        url: absoluteUrl(
+          item.url ||
+          item.sourceUrl ||
+          item.website ||
+          "",
+          repositoryUrl
+        ),
 
-/* =========================
-   SMART REPOSITORY LOADER
-========================= */
+        icon: absoluteUrl(
+          item.icon ||
+          item.iconUrl ||
+          "",
+          repositoryUrl
+        ),
 
-async function loadRepositoryIndex(url, meta = {}) {
-  const normalized = normalizeRepoUrl(url);
+        version: String(
+          item.version ||
+          item.versionName ||
+          item.versionCode ||
+          ""
+        ),
+
+        versionCode:
+          item.code != null
+            ? String(item.code)
+            : "",
+
+        apk: absoluteUrl(
+          item.apk || "",
+          repositoryUrl
+        ),
+
+        nsfw:
+          Number(item.nsfw || 0),
+
+        sources: []
+      };
+
+      /* -----------------------------------------
+         Nested Mihon/Keiyoushi sources
+      ----------------------------------------- */
+
+      if (
+        Array.isArray(item.sources)
+      ) {
+        item.sources.forEach(
+          (source, sourceIndex) => {
+            if (
+              !source ||
+              typeof source !== "object"
+            ) {
+              return;
+            }
+
+            const baseUrl = String(
+              source.baseUrl ||
+              source.baseURL ||
+              source.url ||
+              ""
+            ).trim();
+
+            const sourceItem = {
+              id: String(
+                source.id ||
+                `${extensionId}-source-${sourceIndex}`
+              ),
+
+              name: String(
+                source.name ||
+                extensionName
+              ),
+
+              lang: String(
+                source.lang ||
+                extension.lang ||
+                ""
+              ),
+
+              baseUrl: absoluteUrl(
+                baseUrl,
+                repositoryUrl
+              ),
+
+              extensionId,
+
+              extensionName
+            };
+
+            extension.sources.push(
+              sourceItem
+            );
+
+            /*
+              Only expose it as a usable
+              source when baseUrl exists.
+            */
+
+            if (sourceItem.baseUrl) {
+              sources.push(
+                sourceItem
+              );
+            }
+          }
+        );
+      }
+
+      extensions.push(extension);
+    });
 
   /*
-    repo.json / JSON first
+    Keep the nested sources available
+    on the repository result.
+  */
+
+  return extensions;
+}
+
+/* =========================================================
+   FLATTEN SOURCES
+========================================================= */
+
+function flattenSources(
+  extensions
+) {
+  const results = [];
+
+  for (const extension of extensions) {
+    if (
+      !Array.isArray(
+        extension.sources
+      )
+    ) {
+      continue;
+    }
+
+    for (const source of extension.sources) {
+      if (!source.baseUrl) {
+        continue;
+      }
+
+      results.push({
+        id: source.id,
+
+        name: source.name,
+
+        lang: source.lang,
+
+        baseUrl: source.baseUrl,
+
+        extensionId:
+          source.extensionId,
+
+        extensionName:
+          source.extensionName,
+
+        extensionVersion:
+          extension.version || "",
+
+        extensionPackage:
+          extension.id || "",
+
+        apk:
+          extension.apk || "",
+
+        icon:
+          extension.icon || ""
+      });
+    }
+  }
+
+  return results;
+}
+
+/* =========================================================
+   REPOSITORY LOADER
+========================================================= */
+
+async function loadRepositoryIndex(
+  url,
+  meta = {}
+) {
+  const normalized =
+    normalizeRepoUrl(url);
+
+  /*
+    JSON
   */
 
   if (
-    normalized.endsWith(".json") ||
-    normalized.includes("index.json")
+    normalized
+      .toLowerCase()
+      .endsWith(".json") ||
+    normalized.includes(
+      "index.json"
+    )
   ) {
     return loadJsonIndex(
       normalized,
@@ -769,20 +656,45 @@ async function loadRepositoryIndex(url, meta = {}) {
   }
 
   /*
-    Protobuf
+    For a protobuf repository,
+    try its JSON mirror first.
+
+    Keiyoushi publishes index.min.json,
+    index.json and index.pb.
   */
 
   if (
-    normalized.endsWith(".pb") ||
-    normalized.includes("index.pb")
+    normalized
+      .toLowerCase()
+      .endsWith(".pb") ||
+    normalized.includes(
+      "index.pb"
+    )
   ) {
-    return loadProtobufRepository(
-      normalized
+    const jsonCandidates =
+      getJsonCandidates(
+        normalized
+      );
+
+    for (
+      const candidate of jsonCandidates
+    ) {
+      try {
+        return await loadJsonIndex(
+          candidate,
+          meta
+        );
+      } catch {}
+    }
+
+    throw new Error(
+      "Protobuf repository could not be converted into usable source metadata. Use its JSON index when available."
     );
   }
 
   /*
-    Try JSON first.
+    Unknown format:
+    JSON first.
   */
 
   try {
@@ -792,66 +704,182 @@ async function loadRepositoryIndex(url, meta = {}) {
     );
   } catch {}
 
-  /*
-    Then protobuf.
-  */
-
-  return loadProtobufRepository(
-    normalized
+  throw new Error(
+    "Unsupported repository format"
   );
 }
 
-/* =========================
+/* =========================================================
+   JSON CANDIDATES FOR PB REPOSITORIES
+========================================================= */
+
+function getJsonCandidates(
+  protobufUrl
+) {
+  const candidates = [];
+
+  try {
+    const parsed =
+      new URL(protobufUrl);
+
+    /*
+      raw.githubusercontent.com
+    */
+
+    if (
+      parsed.hostname ===
+      "raw.githubusercontent.com"
+    ) {
+      const path =
+        parsed.pathname;
+
+      if (
+        path.endsWith(
+          "/index.pb"
+        )
+      ) {
+        candidates.push(
+          `${parsed.origin}` +
+          path.replace(
+            /\/index\.pb$/,
+            "/index.min.json"
+          )
+        );
+
+        candidates.push(
+          `${parsed.origin}` +
+          path.replace(
+            /\/index\.pb$/,
+            "/index.json"
+          )
+        );
+      }
+    }
+
+    /*
+      github.com/.../raw/...
+    */
+
+    if (
+      parsed.hostname ===
+      "github.com"
+    ) {
+      const raw =
+        normalizeGitHubUrl(
+          protobufUrl
+        );
+
+      if (raw !== protobufUrl) {
+        candidates.push(
+          ...getJsonCandidates(raw)
+        );
+      }
+    }
+  } catch {}
+
+  return [
+    ...new Set(candidates)
+  ];
+}
+
+/* =========================================================
    PUBLIC REPOSITORY API
-========================= */
+========================================================= */
 
 app.get(
   "/api/repository",
   async (req, res) => {
     const rawUrl =
-      String(req.query.url || "").trim();
+      String(
+        req.query.url || ""
+      ).trim();
 
     if (!rawUrl) {
       return res.status(400).json({
-        error: "Missing repository URL"
+        ok: false,
+        error:
+          "Missing repository URL"
       });
     }
 
     let url;
 
     try {
-      url = new URL(rawUrl).href;
+      url =
+        new URL(rawUrl).href;
     } catch {
       return res.status(400).json({
-        error: "Invalid repository URL"
+        ok: false,
+        error:
+          "Invalid repository URL"
       });
     }
 
     if (
-      url.startsWith("http://") === false &&
-      url.startsWith("https://") === false
+      !url.startsWith(
+        "http://"
+      ) &&
+      !url.startsWith(
+        "https://"
+      )
     ) {
       return res.status(400).json({
-        error: "Only HTTP and HTTPS repositories are supported"
+        ok: false,
+        error:
+          "Only HTTP and HTTPS repositories are supported"
       });
     }
 
     try {
       const result =
-        await loadRepositoryIndex(url);
+        await loadRepositoryIndex(
+          url
+        );
+
+      const sources =
+        flattenSources(
+          result.extensions
+        );
 
       res.json({
         ok: true,
+
         repository: {
           url,
-          name: result.name,
-          format: result.format
+
+          name:
+            result.name ||
+            "Repository",
+
+          website:
+            result.website ||
+            "",
+
+          format:
+            result.format ||
+            "json"
         },
-        extensions: result.extensions
+
+        extensionCount:
+          result.extensions.length,
+
+        sourceCount:
+          sources.length,
+
+        extensions:
+          result.extensions,
+
+        sources
       });
     } catch (error) {
+      console.error(
+        "Repository error:",
+        error
+      );
+
       res.status(502).json({
         ok: false,
+
         error:
           error.message ||
           "Could not read repository"
@@ -860,20 +888,97 @@ app.get(
   }
 );
 
-/* =========================
+/* =========================================================
+   SOURCES API
+========================================================= */
+
+/*
+  This endpoint returns only actual source
+  metadata extracted from repositories.
+
+  It does NOT execute Mihon APKs.
+*/
+
+app.get(
+  "/api/sources",
+  async (req, res) => {
+    const rawUrl =
+      String(
+        req.query.url || ""
+      ).trim();
+
+    if (!rawUrl) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Missing repository URL"
+      });
+    }
+
+    try {
+      const url =
+        new URL(rawUrl).href;
+
+      const result =
+        await loadRepositoryIndex(
+          url
+        );
+
+      const sources =
+        flattenSources(
+          result.extensions
+        );
+
+      res.json({
+        ok: true,
+
+        repository: {
+          url,
+
+          name:
+            result.name ||
+            "Repository",
+
+          format:
+            result.format ||
+            "json"
+        },
+
+        count:
+          sources.length,
+
+        sources
+      });
+    } catch (error) {
+      res.status(502).json({
+        ok: false,
+
+        error:
+          error.message ||
+          "Could not load sources"
+      });
+    }
+  }
+);
+
+/* =========================================================
    404
-========================= */
+========================================================= */
 
-app.use((req, res) => {
-  res.status(404).json({
-    error: "Endpoint not found",
-    path: req.path
-  });
-});
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      error:
+        "Endpoint not found",
+      path:
+        req.path
+    });
+  }
+);
 
-/* =========================
+/* =========================================================
    START
-========================= */
+========================================================= */
 
 app.listen(
   PORT,
