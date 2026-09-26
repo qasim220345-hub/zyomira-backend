@@ -2,990 +2,600 @@ const express = require("express");
 const cors = require("cors");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = process.env.PORT || 10000;
+const COMICK_API = "https://api.comick.io";
+const COMICK_SITE = "https://comick.io";
+const IMAGE_HOST = "https://meo.comick.pictures";
 
-/* =========================================================
-   DEMO TITLES
-========================================================= */
+const USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36";
 
-const titles = [
-  {
-    id: "solo-leveling",
-    title: "Solo Leveling",
-    type: "Manhwa",
-    status: "Completed",
-    description: "Fantasy action series.",
-    cover:
-      "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600"
-  },
-  {
-    id: "beginning-after-end",
-    title: "The Beginning After the End",
-    type: "Manhwa",
-    status: "Ongoing",
-    description: "A powerful king is reborn into a new world.",
-    cover:
-      "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600"
-  },
-  {
-    id: "manga-collection",
-    title: "Manga Collection",
-    type: "Manga",
-    status: "Collection",
-    description: "A demo manga collection for Zyomira.",
-    cover:
-      "https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=600"
-  },
-  {
-    id: "manhua-collection",
-    title: "Manhua Collection",
-    type: "Manhua",
-    status: "Collection",
-    description: "A demo manhua collection for Zyomira.",
-    cover:
-      "https://images.unsplash.com/photo-1512820790803-83ca734da794?w=600"
+/* -------------------------------------------------------
+   Basic helpers
+------------------------------------------------------- */
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      "User-Agent": USER_AGENT,
+      ...(options.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
   }
-];
 
-const demoPages = [
-  "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1200",
-  "https://images.unsplash.com/photo-1613376023733-0a73315d9b06?w=1200",
-  "https://images.unsplash.com/photo-1541560052-77ec1bbc09f7?w=1200",
-  "https://images.unsplash.com/photo-1512820790803-83ca734da794?w=1200"
-];
+  return response.json();
+}
 
-/* =========================================================
-   BASIC API
-========================================================= */
+async function fetchText(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      Accept: "text/html,application/xhtml+xml",
+      "User-Agent": USER_AGENT,
+      ...(options.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return response.text();
+}
+
+function safeText(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function getCover(comic) {
+  if (!comic) return "";
+
+  if (comic.md_covers && comic.md_covers.length) {
+    const cover = comic.md_covers[0];
+
+    if (cover.b2key) {
+      return `${IMAGE_HOST}/${cover.b2key}`;
+    }
+  }
+
+  if (comic.thumbnail) return comic.thumbnail;
+
+  return "";
+}
+
+/* -------------------------------------------------------
+   Health
+------------------------------------------------------- */
 
 app.get("/", (req, res) => {
   res.json({
+    service: "Zyomira backend",
+    version: "2.0.0",
     status: "online",
-    service: "Zyomira API",
-    message: "Zyomira backend is running."
+    source: "Comick adapter"
   });
 });
 
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    service: "Zyomira backend"
+    service: "Zyomira backend",
+    version: "2.0.0",
+    source: "Comick"
   });
 });
 
-/* =========================================================
-   SEARCH
-========================================================= */
+/* -------------------------------------------------------
+   Source list
+------------------------------------------------------- */
 
-app.get("/api/search", (req, res) => {
-  const query = String(req.query.q || "")
-    .trim()
-    .toLowerCase();
+app.get("/api/sources", (req, res) => {
+  res.json({
+    sources: [
+      {
+        id: "comick",
+        name: "Comick",
+        type: "manga",
+        supports: [
+          "manga",
+          "manhwa",
+          "manhua",
+          "search",
+          "chapters",
+          "reader"
+        ],
+        online: true
+      }
+    ]
+  });
+});
 
-  if (!query) {
+/* -------------------------------------------------------
+   REAL SEARCH
+------------------------------------------------------- */
+
+app.get("/api/search", async (req, res) => {
+  const q = safeText(req.query.q).trim();
+
+  if (!q) {
     return res.json({
-      query: "",
+      source: "comick",
       results: []
     });
   }
 
-  const results = titles.filter(item =>
-    item.title.toLowerCase().includes(query) ||
-    item.type.toLowerCase().includes(query) ||
-    item.description.toLowerCase().includes(query)
-  );
+  try {
+    const url =
+      `${COMICK_API}/v1.0/search/` +
+      `?q=${encodeURIComponent(q)}` +
+      `&limit=20` +
+      `&page=1`;
 
-  res.json({
-    query,
-    results
-  });
-});
+    const data = await fetchJson(url);
 
-/* =========================================================
-   TITLE
-========================================================= */
+    const raw = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.comics)
+        ? data.comics
+        : Array.isArray(data?.results)
+          ? data.results
+          : [];
 
-app.get("/api/title/:id", (req, res) => {
-  const item = titles.find(
-    title => title.id === req.params.id
-  );
+    const results = raw
+      .filter(item => {
+        // Keep the normal/safe catalogue only.
+        const rating =
+          item.content_rating ||
+          item.contentRating ||
+          "safe";
 
-  if (!item) {
-    return res.status(404).json({
-      error: "Title not found"
-    });
-  }
-
-  res.json(item);
-});
-
-/* =========================================================
-   CHAPTERS
-========================================================= */
-
-app.get("/api/title/:id/chapters", (req, res) => {
-  const item = titles.find(
-    title => title.id === req.params.id
-  );
-
-  if (!item) {
-    return res.status(404).json({
-      error: "Title not found"
-    });
-  }
-
-  const chapters = Array.from(
-    { length: 20 },
-    (_, index) => ({
-      number: index + 1,
-      title: `Chapter ${index + 1}`,
-      id: `${item.id}-chapter-${index + 1}`
-    })
-  );
-
-  res.json({
-    titleId: item.id,
-    title: item.title,
-    chapters
-  });
-});
-
-/* =========================================================
-   READER
-========================================================= */
-
-app.get(
-  "/api/title/:id/chapter/:chapter",
-  (req, res) => {
-    const item = titles.find(
-      title => title.id === req.params.id
-    );
-
-    if (!item) {
-      return res.status(404).json({
-        error: "Title not found"
-      });
-    }
-
-    const chapterNumber =
-      Number(req.params.chapter);
-
-    if (
-      !Number.isInteger(chapterNumber) ||
-      chapterNumber < 1 ||
-      chapterNumber > 20
-    ) {
-      return res.status(404).json({
-        error: "Chapter not found"
-      });
-    }
+        return rating !== "pornographic";
+      })
+      .map((item, index) => ({
+        id: item.hid || item.id || `comick-${index}`,
+        hid: item.hid || item.id || "",
+        slug: item.slug || "",
+        title:
+          item.title ||
+          item.name ||
+          "Unknown title",
+        description:
+          item.desc ||
+          item.description ||
+          "",
+        cover:
+          getCover(item) ||
+          item.thumbnail ||
+          "",
+        country:
+          item.country ||
+          "",
+        status:
+          item.status ||
+          null,
+        lastChapter:
+          item.last_chapter ??
+          null,
+        contentRating:
+          item.content_rating ||
+          "safe",
+        source: "comick"
+      }));
 
     res.json({
-      id: `${item.id}-chapter-${chapterNumber}`,
-      title: item.title,
-      chapter: chapterNumber,
-      pages: demoPages.map((url, index) => ({
-        page: index + 1,
-        url
-      }))
+      source: "comick",
+      query: q,
+      count: results.length,
+      results
+    });
+
+  } catch (error) {
+    console.error("Comick search error:", error);
+
+    res.status(502).json({
+      error: "Comick search is temporarily unavailable.",
+      source: "comick"
     });
   }
-);
+});
 
-/* =========================================================
-   REMOTE FETCH
-========================================================= */
+/* -------------------------------------------------------
+   TITLE DETAILS
+------------------------------------------------------- */
 
-async function fetchBuffer(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Zyomira/1.2"
-    }
-  });
+app.get("/api/source/comick/title/:hid", async (req, res) => {
+  const hid = safeText(req.params.hid).trim();
 
-  if (!response.ok) {
-    throw new Error(
-      `Remote server returned HTTP ${response.status}`
-    );
+  if (!hid) {
+    return res.status(400).json({
+      error: "Missing title ID"
+    });
   }
-
-  return Buffer.from(
-    await response.arrayBuffer()
-  );
-}
-
-async function fetchText(url) {
-  const buffer = await fetchBuffer(url);
-  return buffer.toString("utf8");
-}
-
-/* =========================================================
-   URL HELPERS
-========================================================= */
-
-function normalizeGitHubUrl(url) {
-  try {
-    const parsed = new URL(url);
-
-    if (parsed.hostname !== "github.com") {
-      return url;
-    }
-
-    const parts = parsed.pathname
-      .split("/")
-      .filter(Boolean);
-
-    const rawIndex =
-      parts.indexOf("raw");
-
-    if (
-      rawIndex !== -1 &&
-      parts.length > rawIndex + 2
-    ) {
-      const owner = parts[0];
-      const repo = parts[1];
-      const branch = parts[rawIndex + 1];
-
-      const file = parts
-        .slice(rawIndex + 2)
-        .join("/");
-
-      return (
-        `https://raw.githubusercontent.com/` +
-        `${owner}/${repo}/${branch}/${file}`
-      );
-    }
-
-    return url;
-  } catch {
-    return url;
-  }
-}
-
-function normalizeRepoUrl(url) {
-  return normalizeGitHubUrl(url);
-}
-
-function absoluteUrl(value, baseUrl) {
-  if (!value) return "";
 
   try {
-    return new URL(
-      value,
-      baseUrl
-    ).href;
-  } catch {
-    return String(value);
+    const data = await fetchJson(
+      `${COMICK_API}/comic/${encodeURIComponent(hid)}`
+    );
+
+    const comic =
+      data?.comic ||
+      data?.data?.comic ||
+      data;
+
+    res.json({
+      source: "comick",
+      id: comic.hid || hid,
+      hid: comic.hid || hid,
+      slug: comic.slug || "",
+      title: comic.title || "Unknown title",
+      description:
+        comic.desc ||
+        comic.description ||
+        "",
+      cover: getCover(comic),
+      country: comic.country || "",
+      status: comic.status || null,
+      year: comic.year || null,
+      lastChapter: comic.last_chapter ?? null,
+      contentRating:
+        comic.content_rating ||
+        "safe"
+    });
+
+  } catch (error) {
+    console.error("Title error:", error);
+
+    res.status(502).json({
+      error: "Could not load title.",
+      source: "comick"
+    });
   }
-}
+});
 
-/* =========================================================
-   JSON REPOSITORY
-========================================================= */
+/* -------------------------------------------------------
+   CHAPTER LIST
+------------------------------------------------------- */
 
-async function loadJsonIndex(
-  url,
-  meta = {}
-) {
-  const text = await fetchText(url);
+app.get("/api/source/comick/title/:hid/chapters", async (req, res) => {
+  const hid = safeText(req.params.hid).trim();
 
-  let data;
+  if (!hid) {
+    return res.status(400).json({
+      error: "Missing title ID"
+    });
+  }
+
+  const lang = safeText(req.query.lang) || "en";
+  const page = Number(req.query.page || 1);
 
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "Repository index is not valid JSON"
-    );
+    const url =
+      `${COMICK_API}/comic/${encodeURIComponent(hid)}/chapters` +
+      `?lang=${encodeURIComponent(lang)}` +
+      `&page=${page}` +
+      `&chap-order=0`;
+
+    const data = await fetchJson(url);
+
+    const raw =
+      Array.isArray(data?.chapters)
+        ? data.chapters
+        : Array.isArray(data)
+          ? data
+          : [];
+
+    const chapters = raw.map((chapter, index) => ({
+      id:
+        chapter.hid ||
+        chapter.id ||
+        `${hid}-${index}`,
+
+      hid:
+        chapter.hid ||
+        "",
+
+      chapter:
+        chapter.chap ??
+        "",
+
+      title:
+        chapter.title ||
+        "",
+
+      volume:
+        chapter.vol ??
+        null,
+
+      language:
+        chapter.lang ||
+        lang,
+
+      group:
+        Array.isArray(chapter.group_name)
+          ? chapter.group_name.join(", ")
+          : safeText(chapter.group_name),
+
+      publishedAt:
+        chapter.publish_at ||
+        chapter.created_at ||
+        null
+    }));
+
+    res.json({
+      source: "comick",
+      titleId: hid,
+      language: lang,
+      page,
+      chapters
+    });
+
+  } catch (error) {
+    console.error("Chapter list error:", error);
+
+    res.status(502).json({
+      error: "Could not load chapters.",
+      source: "comick"
+    });
   }
+});
 
-  const extensions =
-    extractJsonExtensions(
-      data,
-      url
-    );
+/* -------------------------------------------------------
+   CHAPTER PAGES
+------------------------------------------------------- */
 
-  if (!extensions.length) {
-    throw new Error(
-      "JSON repository contains no extensions"
-    );
-  }
+app.get(
+  "/api/source/comick/chapter/:chapterHid",
+  async (req, res) => {
+    const chapterHid =
+      safeText(req.params.chapterHid).trim();
 
-  return {
-    name:
-      meta.name ||
-      data.name ||
-      "JSON Repository",
+    if (!chapterHid) {
+      return res.status(400).json({
+        error: "Missing chapter ID"
+      });
+    }
 
-    website:
-      meta.website ||
-      data.website ||
-      "",
+    try {
+      /*
+       * Comick's chapter page exposes md_images.
+       * We first try the public API.
+       */
 
-    format: "json",
+      let data = null;
 
-    extensions
-  };
-}
-
-/* =========================================================
-   JSON EXTENSION PARSER
-========================================================= */
-
-function extractJsonExtensions(
-  data,
-  repositoryUrl
-) {
-  let array = [];
-
-  if (Array.isArray(data)) {
-    array = data;
-  } else if (
-    data &&
-    typeof data === "object"
-  ) {
-    const candidates = [
-      data.extensions,
-      data.sources,
-      data.items,
-      data.entries,
-      data.plugins,
-      data.apps,
-      data.data
-    ];
-
-    for (const candidate of candidates) {
-      if (Array.isArray(candidate)) {
-        array = candidate;
-        break;
+      try {
+        data = await fetchJson(
+          `${COMICK_API}/chapter/${encodeURIComponent(chapterHid)}`
+        );
+      } catch {
+        // Some API versions expose chapter information
+        // through the website page instead.
       }
-    }
-  }
 
-  return normalizeExtensionArray(
-    array,
-    repositoryUrl
-  );
-}
+      let images = [];
 
-/* =========================================================
-   EXTENSION NORMALIZER
+      const chapter =
+        data?.chapter ||
+        data?.data?.chapter ||
+        data;
 
-   IMPORTANT:
-   Keiyoushi metadata looks like:
+      if (Array.isArray(chapter?.md_images)) {
+        images = chapter.md_images.map((image, index) => ({
+          number: index + 1,
+          url: image.url ||
+            `${IMAGE_HOST}/${image.b2key}`,
+          b2key: image.b2key || ""
+        }));
+      }
 
-   {
-     name,
-     pkg,
-     apk,
-     lang,
-     version,
-     sources: [
-       {
-         name,
-         lang,
-         id,
-         baseUrl
-       }
-     ]
-   }
+      /*
+       * Fallback:
+       * fetch the Comick chapter page and read __NEXT_DATA__.
+       */
 
-   We now extract BOTH:
+      if (!images.length) {
+        const pageUrl =
+          `${COMICK_SITE}/comic/${encodeURIComponent(chapterHid)}`;
 
-   Extension metadata
-   AND
-   nested source metadata.
-========================================================= */
+        try {
+          const html = await fetchText(pageUrl);
 
-function normalizeExtensionArray(
-  array,
-  repositoryUrl
-) {
-  const extensions = [];
-  const sources = [];
-
-  array
-    .filter(
-      item =>
-        item &&
-        typeof item === "object"
-    )
-    .forEach((item, index) => {
-      const extensionId = String(
-        item.pkg ||
-        item.package ||
-        item.id ||
-        `extension-${index}`
-      );
-
-      const extensionName = String(
-        item.name ||
-        item.title ||
-        item.label ||
-        item.pkg ||
-        "Unnamed Extension"
-      );
-
-      const extension = {
-        id: extensionId,
-
-        name: extensionName,
-
-        description: String(
-          item.description ||
-          item.summary ||
-          ""
-        ),
-
-        type: String(
-          item.type ||
-          item.category ||
-          "Manga"
-        ),
-
-        lang: String(
-          item.lang ||
-          item.language ||
-          ""
-        ),
-
-        url: absoluteUrl(
-          item.url ||
-          item.sourceUrl ||
-          item.website ||
-          "",
-          repositoryUrl
-        ),
-
-        icon: absoluteUrl(
-          item.icon ||
-          item.iconUrl ||
-          "",
-          repositoryUrl
-        ),
-
-        version: String(
-          item.version ||
-          item.versionName ||
-          item.versionCode ||
-          ""
-        ),
-
-        versionCode:
-          item.code != null
-            ? String(item.code)
-            : "",
-
-        apk: absoluteUrl(
-          item.apk || "",
-          repositoryUrl
-        ),
-
-        nsfw:
-          Number(item.nsfw || 0),
-
-        sources: []
-      };
-
-      /* -----------------------------------------
-         Nested Mihon/Keiyoushi sources
-      ----------------------------------------- */
-
-      if (
-        Array.isArray(item.sources)
-      ) {
-        item.sources.forEach(
-          (source, sourceIndex) => {
-            if (
-              !source ||
-              typeof source !== "object"
-            ) {
-              return;
-            }
-
-            const baseUrl = String(
-              source.baseUrl ||
-              source.baseURL ||
-              source.url ||
-              ""
-            ).trim();
-
-            const sourceItem = {
-              id: String(
-                source.id ||
-                `${extensionId}-source-${sourceIndex}`
-              ),
-
-              name: String(
-                source.name ||
-                extensionName
-              ),
-
-              lang: String(
-                source.lang ||
-                extension.lang ||
-                ""
-              ),
-
-              baseUrl: absoluteUrl(
-                baseUrl,
-                repositoryUrl
-              ),
-
-              extensionId,
-
-              extensionName
-            };
-
-            extension.sources.push(
-              sourceItem
+          const match =
+            html.match(
+              /<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/
             );
 
-            /*
-              Only expose it as a usable
-              source when baseUrl exists.
-            */
+          if (match) {
+            const nextData =
+              JSON.parse(match[1]);
 
-            if (sourceItem.baseUrl) {
-              sources.push(
-                sourceItem
-              );
+            const pageChapter =
+              nextData?.props?.pageProps?.chapter;
+
+            if (
+              Array.isArray(
+                pageChapter?.md_images
+              )
+            ) {
+              images =
+                pageChapter.md_images.map(
+                  (image, index) => ({
+                    number: index + 1,
+                    url:
+                      image.url ||
+                      `${IMAGE_HOST}/${image.b2key}`,
+                    b2key:
+                      image.b2key || ""
+                  })
+                );
             }
           }
-        );
+        } catch (fallbackError) {
+          console.error(
+            "Chapter page fallback error:",
+            fallbackError.message
+          );
+        }
       }
 
-      extensions.push(extension);
-    });
-
-  /*
-    Keep the nested sources available
-    on the repository result.
-  */
-
-  return extensions;
-}
-
-/* =========================================================
-   FLATTEN SOURCES
-========================================================= */
-
-function flattenSources(
-  extensions
-) {
-  const results = [];
-
-  for (const extension of extensions) {
-    if (
-      !Array.isArray(
-        extension.sources
-      )
-    ) {
-      continue;
-    }
-
-    for (const source of extension.sources) {
-      if (!source.baseUrl) {
-        continue;
+      if (!images.length) {
+        return res.status(404).json({
+          error: "No reader pages were found.",
+          chapterId: chapterHid,
+          source: "comick"
+        });
       }
 
-      results.push({
-        id: source.id,
+      res.json({
+        source: "comick",
+        chapterId: chapterHid,
+        pageCount: images.length,
+        pages: images
+      });
 
-        name: source.name,
+    } catch (error) {
+      console.error("Reader error:", error);
 
-        lang: source.lang,
-
-        baseUrl: source.baseUrl,
-
-        extensionId:
-          source.extensionId,
-
-        extensionName:
-          source.extensionName,
-
-        extensionVersion:
-          extension.version || "",
-
-        extensionPackage:
-          extension.id || "",
-
-        apk:
-          extension.apk || "",
-
-        icon:
-          extension.icon || ""
+      res.status(502).json({
+        error: "Could not load reader pages.",
+        source: "comick"
       });
     }
   }
+);
 
-  return results;
-}
+/* -------------------------------------------------------
+   SIMPLE IMAGE PROXY
+------------------------------------------------------- */
 
-/* =========================================================
-   REPOSITORY LOADER
-========================================================= */
+app.get("/api/image", async (req, res) => {
+  const imageUrl = safeText(req.query.url).trim();
 
-async function loadRepositoryIndex(
-  url,
-  meta = {}
-) {
-  const normalized =
-    normalizeRepoUrl(url);
-
-  /*
-    JSON
-  */
-
-  if (
-    normalized
-      .toLowerCase()
-      .endsWith(".json") ||
-    normalized.includes(
-      "index.json"
-    )
-  ) {
-    return loadJsonIndex(
-      normalized,
-      meta
-    );
+  if (!imageUrl) {
+    return res.status(400).send("Missing image URL");
   }
-
-  /*
-    For a protobuf repository,
-    try its JSON mirror first.
-
-    Keiyoushi publishes index.min.json,
-    index.json and index.pb.
-  */
-
-  if (
-    normalized
-      .toLowerCase()
-      .endsWith(".pb") ||
-    normalized.includes(
-      "index.pb"
-    )
-  ) {
-    const jsonCandidates =
-      getJsonCandidates(
-        normalized
-      );
-
-    for (
-      const candidate of jsonCandidates
-    ) {
-      try {
-        return await loadJsonIndex(
-          candidate,
-          meta
-        );
-      } catch {}
-    }
-
-    throw new Error(
-      "Protobuf repository could not be converted into usable source metadata. Use its JSON index when available."
-    );
-  }
-
-  /*
-    Unknown format:
-    JSON first.
-  */
 
   try {
-    return await loadJsonIndex(
-      normalized,
-      meta
-    );
-  } catch {}
+    const parsed = new URL(imageUrl);
 
-  throw new Error(
-    "Unsupported repository format"
+    const allowedHosts = [
+      "meo.comick.pictures"
+    ];
+
+    if (!allowedHosts.includes(parsed.hostname)) {
+      return res.status(403).send("Image host not allowed");
+    }
+
+    const response = await fetch(imageUrl, {
+      headers: {
+        Referer: `${COMICK_SITE}/`,
+        "User-Agent": USER_AGENT
+      }
+    });
+
+    if (!response.ok) {
+      return res
+        .status(response.status)
+        .send("Could not load image");
+    }
+
+    const contentType =
+      response.headers.get("content-type") ||
+      "image/jpeg";
+
+    const buffer =
+      Buffer.from(await response.arrayBuffer());
+
+    res.setHeader(
+      "Content-Type",
+      contentType
+    );
+
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=604800"
+    );
+
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      "*"
+    );
+
+    res.send(buffer);
+
+  } catch (error) {
+    console.error("Image proxy error:", error);
+    res.status(500).send("Image proxy error");
+  }
+});
+
+/* -------------------------------------------------------
+   OLD DEMO ROUTES
+   Kept so your current frontend does not suddenly break.
+------------------------------------------------------- */
+
+app.get("/api/title/:id", async (req, res) => {
+  const id = req.params.id;
+
+  if (id === "solo-leveling") {
+    return res.json({
+      id: "solo-leveling",
+      title: "Solo Leveling",
+      description:
+        "Demo compatibility title. Use the Comick source for live data.",
+      cover: "",
+      source: "demo"
+    });
+  }
+
+  res.status(404).json({
+    error: "Use the Comick source endpoints for live titles."
+  });
+});
+
+app.get("/api/title/:id/chapters", (req, res) => {
+  res.json({
+    id: req.params.id,
+    chapters: []
+  });
+});
+
+app.get("/api/title/:id/chapter/:chapter", (req, res) => {
+  res.json({
+    id: req.params.id,
+    chapter: req.params.chapter,
+    pages: []
+  });
+});
+
+/* -------------------------------------------------------
+   Error handler
+------------------------------------------------------- */
+
+app.use((err, req, res, next) => {
+  console.error(err);
+
+  res.status(500).json({
+    error: "Zyomira backend error"
+  });
+});
+
+/* -------------------------------------------------------
+   Start
+------------------------------------------------------- */
+
+app.listen(PORT, () => {
+  console.log(
+    `Zyomira backend running on port ${PORT}`
   );
-}
-
-/* =========================================================
-   JSON CANDIDATES FOR PB REPOSITORIES
-========================================================= */
-
-function getJsonCandidates(
-  protobufUrl
-) {
-  const candidates = [];
-
-  try {
-    const parsed =
-      new URL(protobufUrl);
-
-    /*
-      raw.githubusercontent.com
-    */
-
-    if (
-      parsed.hostname ===
-      "raw.githubusercontent.com"
-    ) {
-      const path =
-        parsed.pathname;
-
-      if (
-        path.endsWith(
-          "/index.pb"
-        )
-      ) {
-        candidates.push(
-          `${parsed.origin}` +
-          path.replace(
-            /\/index\.pb$/,
-            "/index.min.json"
-          )
-        );
-
-        candidates.push(
-          `${parsed.origin}` +
-          path.replace(
-            /\/index\.pb$/,
-            "/index.json"
-          )
-        );
-      }
-    }
-
-    /*
-      github.com/.../raw/...
-    */
-
-    if (
-      parsed.hostname ===
-      "github.com"
-    ) {
-      const raw =
-        normalizeGitHubUrl(
-          protobufUrl
-        );
-
-      if (raw !== protobufUrl) {
-        candidates.push(
-          ...getJsonCandidates(raw)
-        );
-      }
-    }
-  } catch {}
-
-  return [
-    ...new Set(candidates)
-  ];
-}
-
-/* =========================================================
-   PUBLIC REPOSITORY API
-========================================================= */
-
-app.get(
-  "/api/repository",
-  async (req, res) => {
-    const rawUrl =
-      String(
-        req.query.url || ""
-      ).trim();
-
-    if (!rawUrl) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Missing repository URL"
-      });
-    }
-
-    let url;
-
-    try {
-      url =
-        new URL(rawUrl).href;
-    } catch {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Invalid repository URL"
-      });
-    }
-
-    if (
-      !url.startsWith(
-        "http://"
-      ) &&
-      !url.startsWith(
-        "https://"
-      )
-    ) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Only HTTP and HTTPS repositories are supported"
-      });
-    }
-
-    try {
-      const result =
-        await loadRepositoryIndex(
-          url
-        );
-
-      const sources =
-        flattenSources(
-          result.extensions
-        );
-
-      res.json({
-        ok: true,
-
-        repository: {
-          url,
-
-          name:
-            result.name ||
-            "Repository",
-
-          website:
-            result.website ||
-            "",
-
-          format:
-            result.format ||
-            "json"
-        },
-
-        extensionCount:
-          result.extensions.length,
-
-        sourceCount:
-          sources.length,
-
-        extensions:
-          result.extensions,
-
-        sources
-      });
-    } catch (error) {
-      console.error(
-        "Repository error:",
-        error
-      );
-
-      res.status(502).json({
-        ok: false,
-
-        error:
-          error.message ||
-          "Could not read repository"
-      });
-    }
-  }
-);
-
-/* =========================================================
-   SOURCES API
-========================================================= */
-
-/*
-  This endpoint returns only actual source
-  metadata extracted from repositories.
-
-  It does NOT execute Mihon APKs.
-*/
-
-app.get(
-  "/api/sources",
-  async (req, res) => {
-    const rawUrl =
-      String(
-        req.query.url || ""
-      ).trim();
-
-    if (!rawUrl) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Missing repository URL"
-      });
-    }
-
-    try {
-      const url =
-        new URL(rawUrl).href;
-
-      const result =
-        await loadRepositoryIndex(
-          url
-        );
-
-      const sources =
-        flattenSources(
-          result.extensions
-        );
-
-      res.json({
-        ok: true,
-
-        repository: {
-          url,
-
-          name:
-            result.name ||
-            "Repository",
-
-          format:
-            result.format ||
-            "json"
-        },
-
-        count:
-          sources.length,
-
-        sources
-      });
-    } catch (error) {
-      res.status(502).json({
-        ok: false,
-
-        error:
-          error.message ||
-          "Could not load sources"
-      });
-    }
-  }
-);
-
-/* =========================================================
-   404
-========================================================= */
-
-app.use(
-  (req, res) => {
-    res.status(404).json({
-      error:
-        "Endpoint not found",
-      path:
-        req.path
-    });
-  }
-);
-
-/* =========================================================
-   START
-========================================================= */
-
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Zyomira backend running on port ${PORT}`
-    );
-  }
-);
+});
