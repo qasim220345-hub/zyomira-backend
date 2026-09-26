@@ -1,68 +1,64 @@
 const express = require("express");
+const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
+
+app.use(cors());
+app.use(express.json());
 
 app.get("/", (req, res) => {
   res.json({
-    app: "Zyomira Backend",
-    status: "online"
+    name: "Zyomira API",
+    status: "online",
+    version: "1.0.0"
   });
 });
 
-app.get("/api/chapters/:mangaId", async (req, res) => {
-  try {
-    const mangaId = encodeURIComponent(req.params.mangaId);
-
-    const url =
-      `https://api.mangadex.org/manga/${mangaId}/feed` +
-      `?translatedLanguage[]=en` +
-      `&contentRating[]=safe` +
-      `&order[chapter]=asc` +
-      `&limit=100`;
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: "Chapter source returned an error"
-      });
-    }
-
-    const data = await response.json();
-    res.json(data);
-
-  } catch (error) {
-    res.status(500).json({
-      error: "Could not load chapters"
-    });
-  }
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "Zyomira backend"
+  });
 });
 
-app.get("/api/pages/:chapterId", async (req, res) => {
-  try {
-    const chapterId = encodeURIComponent(req.params.chapterId);
+app.get("/api/search", (req, res) => {
+  const query = String(req.query.q || "").trim();
 
-    const response = await fetch(
-      `https://api.mangadex.org/at-home/server/${chapterId}`
-    );
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: "Could not load chapter pages"
-      });
-    }
-
-    const data = await response.json();
-    res.json(data);
-
-  } catch (error) {
-    res.status(500).json({
-      error: "Could not load chapter pages"
+  if (!query) {
+    return res.json({
+      results: []
     });
   }
+
+  res.json({
+    query,
+    results: []
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`Zyomira backend running on port ${PORT}`);
+app.get("/api/title/:id", (req, res) => {
+  res.status(404).json({
+    error: "Title not found",
+    id: req.params.id
+  });
+});
+
+app.get("/api/title/:id/chapters", (req, res) => {
+  res.json({
+    id: req.params.id,
+    chapters: []
+  });
+});
+
+app.get("/api/title/:id/chapter/:chapter", (req, res) => {
+  res.json({
+    id: req.params.id,
+    chapter: req.params.chapter,
+    pages: []
+  });
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Zyomira API running on port ${PORT}`);
 });
