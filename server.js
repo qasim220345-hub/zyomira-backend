@@ -7,8 +7,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const COMICK_PROXY =
-  "https://comick-api-proxy.notaspider.dev/api/v1.0";
+const COMICK_PROXY = "https://comick-api-proxy.notaspider.dev/api/v1.0";
+const COMICK_PROXY_ROOT = "https://comick-api-proxy.notaspider.dev";
 
 /* -------------------------
    HOME
@@ -18,7 +18,7 @@ app.get("/", (req, res) => {
   res.json({
     service: "Zyomira backend",
     status: "online",
-    version: "1.1.0"
+    version: "1.2.0"
   });
 });
 
@@ -70,12 +70,11 @@ app.get("/api/search", async (req, res) => {
 
     const results = rawResults
       .filter(item => {
-        const rating =
-          String(
-            item.content_rating ||
-            item.contentRating ||
-            ""
-          ).toLowerCase();
+        const rating = String(
+          item.content_rating ||
+          item.contentRating ||
+          ""
+        ).toLowerCase();
 
         return rating !== "pornographic";
       })
@@ -85,14 +84,8 @@ app.get("/api/search", async (req, res) => {
         slug: item.slug || "",
         title: item.title || "Unknown title",
         description: item.desc || item.description || "",
-        cover:
-          item.cover ||
-          item.thumbnail ||
-          "",
-        thumbnail:
-          item.thumbnail ||
-          item.cover ||
-          "",
+        cover: item.cover || item.thumbnail || "",
+        thumbnail: item.thumbnail || item.cover || "",
         country: item.country || "",
         status: item.status ?? null,
         year: item.year ?? null,
@@ -177,29 +170,104 @@ app.get(
       );
 
       const page = String(
-        req.query.page || "1"
+        req.query.page || "0"
       );
 
-      const url =
-        `${COMICK_PROXY}/comic/${encodeURIComponent(hid)}/chapters` +
-        `?lang=${encodeURIComponent(lang)}` +
-        `&page=${encodeURIComponent(page)}`;
+      const limit = String(
+        req.query.limit || "100"
+      );
 
-      console.log("CHAPTER URL:", url);
+      const encodedHid =
+        encodeURIComponent(hid);
 
-      const response = await fetch(url);
+      const encodedLang =
+        encodeURIComponent(lang);
 
-      if (!response.ok) {
-        return res.status(response.status).json({
-          error: "Could not load chapters",
-          source: "comick",
-          details: `HTTP ${response.status}`
-        });
+      const encodedPage =
+        encodeURIComponent(page);
+
+      const encodedLimit =
+        encodeURIComponent(limit);
+
+      /*
+       * The proxy documents both:
+       *
+       * /api/comic/{hid}/chapters
+       * /api/v1.0/comic/{hid}/chapters
+       *
+       * Try the normal endpoint first.
+       */
+
+      const urls = [
+        `${COMICK_PROXY_ROOT}/api/comic/${encodedHid}/chapters` +
+        `?lang=${encodedLang}` +
+        `&page=${encodedPage}` +
+        `&limit=${encodedLimit}`,
+
+        `${COMICK_PROXY}/comic/${encodedHid}/chapters` +
+        `?lang=${encodedLang}` +
+        `&page=${encodedPage}` +
+        `&limit=${encodedLimit}`
+      ];
+
+      let lastStatus = 500;
+      let lastData = null;
+
+      for (const url of urls) {
+        console.log("TRYING CHAPTER URL:", url);
+
+        try {
+          const response = await fetch(url, {
+            headers: {
+              "Accept": "application/json"
+            }
+          });
+
+          lastStatus = response.status;
+
+          const text = await response.text();
+
+          let data;
+
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = {
+              raw: text
+            };
+          }
+
+          if (response.ok) {
+            /*
+             * Return the proxy response unchanged.
+             * This lets the frontend inspect the actual
+             * chapter structure.
+             */
+            return res.json(data);
+          }
+
+          lastData = data;
+
+          console.log(
+            "CHAPTER ENDPOINT FAILED:",
+            response.status,
+            data
+          );
+
+        } catch (error) {
+          console.error(
+            "CHAPTER REQUEST ERROR:",
+            error.message
+          );
+        }
       }
 
-      const data = await response.json();
-
-      res.json(data);
+      return res.status(lastStatus).json({
+        error: "Could not load chapters",
+        source: "comick",
+        details: `HTTP ${lastStatus}`,
+        proxyResponse: lastData
+      });
 
     } catch (error) {
       console.error("CHAPTER ERROR:", error);
@@ -222,22 +290,58 @@ app.get(
     try {
       const { chapterHid } = req.params;
 
-      const url =
-        `${COMICK_PROXY}/chapter/${encodeURIComponent(chapterHid)}`;
+      const urls = [
+        `${COMICK_PROXY_ROOT}/api/chapter/${encodeURIComponent(chapterHid)}`,
+        `${COMICK_PROXY}/chapter/${encodeURIComponent(chapterHid)}`
+      ];
 
-      const response = await fetch(url);
+      let lastStatus = 500;
+      let lastData = null;
 
-      if (!response.ok) {
-        return res.status(response.status).json({
-          error: "Could not load chapter",
-          source: "comick",
-          details: `HTTP ${response.status}`
-        });
+      for (const url of urls) {
+        console.log("TRYING CHAPTER PAGE URL:", url);
+
+        try {
+          const response = await fetch(url, {
+            headers: {
+              "Accept": "application/json"
+            }
+          });
+
+          lastStatus = response.status;
+
+          const text = await response.text();
+
+          let data;
+
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = {
+              raw: text
+            };
+          }
+
+          if (response.ok) {
+            return res.json(data);
+          }
+
+          lastData = data;
+
+        } catch (error) {
+          console.error(
+            "CHAPTER PAGE REQUEST ERROR:",
+            error.message
+          );
+        }
       }
 
-      const data = await response.json();
-
-      res.json(data);
+      return res.status(lastStatus).json({
+        error: "Could not load chapter",
+        source: "comick",
+        details: `HTTP ${lastStatus}`,
+        proxyResponse: lastData
+      });
 
     } catch (error) {
       console.error("CHAPTER PAGE ERROR:", error);
@@ -256,7 +360,8 @@ app.get(
 
 app.get("/api/image", async (req, res) => {
   try {
-    const imageUrl = String(req.query.url || "").trim();
+    const imageUrl =
+      String(req.query.url || "").trim();
 
     if (!imageUrl) {
       return res.status(400).json({
@@ -280,7 +385,10 @@ app.get("/api/image", async (req, res) => {
       Buffer.from(await response.arrayBuffer());
 
     res.set("Content-Type", contentType);
-    res.set("Cache-Control", "public, max-age=86400");
+    res.set(
+      "Cache-Control",
+      "public, max-age=86400"
+    );
 
     res.send(buffer);
 
