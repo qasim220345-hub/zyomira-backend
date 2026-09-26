@@ -7,97 +7,69 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-const COMICK_API = "https://api.comick.io";
-const COMICK_SITE = "https://comick.io";
+const COMICK_API = "https://comick.io";
 const IMAGE_HOST = "https://meo.comick.pictures";
 
 const USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36";
 
-/* -------------------------------------------------------
-   Basic helpers
-------------------------------------------------------- */
+/* ---------------- HELPERS ---------------- */
 
-async function fetchJson(url, options = {}) {
+async function fetchJson(url) {
   const response = await fetch(url, {
-    ...options,
     headers: {
       Accept: "application/json",
-      "User-Agent": USER_AGENT,
-      ...(options.headers || {})
+      "User-Agent": USER_AGENT
     }
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    throw new Error(`HTTP ${response.status}`);
   }
 
   return response.json();
 }
 
-async function fetchText(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Accept: "text/html,application/xhtml+xml",
-      "User-Agent": USER_AGENT,
-      ...(options.headers || {})
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-
-  return response.text();
-}
-
-function safeText(value) {
+function text(value) {
   return typeof value === "string" ? value : "";
 }
 
-function getCover(comic) {
-  if (!comic) return "";
+function cover(item) {
+  if (!item) return "";
 
-  if (comic.md_covers && comic.md_covers.length) {
-    const cover = comic.md_covers[0];
+  if (Array.isArray(item.md_covers) && item.md_covers.length) {
+    const c = item.md_covers[0];
 
-    if (cover.b2key) {
-      return `${IMAGE_HOST}/${cover.b2key}`;
+    if (c.b2key) {
+      return `${IMAGE_HOST}/${c.b2key}`;
     }
   }
 
-  if (comic.thumbnail) return comic.thumbnail;
-
-  return "";
+  return item.thumbnail || "";
 }
 
-/* -------------------------------------------------------
-   Health
-------------------------------------------------------- */
+/* ---------------- HOME ---------------- */
 
 app.get("/", (req, res) => {
   res.json({
     service: "Zyomira backend",
-    version: "2.0.0",
-    status: "online",
-    source: "Comick adapter"
+    version: "2.1.0",
+    status: "online"
   });
 });
+
+/* ---------------- HEALTH ---------------- */
 
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     service: "Zyomira backend",
-    version: "2.0.0",
-    source: "Comick"
+    version: "2.1.0"
   });
 });
 
-/* -------------------------------------------------------
-   Source list
-------------------------------------------------------- */
+/* ---------------- SOURCES ---------------- */
 
 app.get("/api/sources", (req, res) => {
   res.json({
@@ -120,75 +92,103 @@ app.get("/api/sources", (req, res) => {
   });
 });
 
-/* -------------------------------------------------------
-   REAL SEARCH
-------------------------------------------------------- */
+/* ---------------- SEARCH ---------------- */
 
 app.get("/api/search", async (req, res) => {
-  const q = safeText(req.query.q).trim();
+  const q = text(req.query.q).trim();
 
   if (!q) {
     return res.json({
       source: "comick",
+      query: "",
+      count: 0,
       results: []
     });
   }
 
   try {
+    /*
+      Current Comick endpoint:
+      /api/v1.0/search
+    */
+
     const url =
-      `${COMICK_API}/v1.0/search/` +
+      `${COMICK_API}/api/v1.0/search` +
       `?q=${encodeURIComponent(q)}` +
       `&limit=20` +
-      `&page=1`;
+      `&page=1` +
+      `&content_rating=safe`;
 
     const data = await fetchJson(url);
 
-    const raw = Array.isArray(data)
-      ? data
-      : Array.isArray(data?.comics)
-        ? data.comics
-        : Array.isArray(data?.results)
-          ? data.results
-          : [];
+    const raw =
+      Array.isArray(data)
+        ? data
+        : Array.isArray(data.comics)
+          ? data.comics
+          : Array.isArray(data.results)
+            ? data.results
+            : [];
 
     const results = raw
       .filter(item => {
-        // Keep the normal/safe catalogue only.
         const rating =
           item.content_rating ||
-          item.contentRating ||
           "safe";
 
         return rating !== "pornographic";
       })
       .map((item, index) => ({
-        id: item.hid || item.id || `comick-${index}`,
-        hid: item.hid || item.id || "",
-        slug: item.slug || "",
+        id:
+          item.hid ||
+          item.id ||
+          `comick-${index}`,
+
+        hid:
+          item.hid ||
+          "",
+
+        slug:
+          item.slug ||
+          "",
+
         title:
           item.title ||
           item.name ||
           "Unknown title",
+
         description:
           item.desc ||
           item.description ||
           "",
+
         cover:
-          getCover(item) ||
+          cover(item),
+
+        thumbnail:
           item.thumbnail ||
-          "",
+          cover(item),
+
         country:
           item.country ||
           "",
+
         status:
-          item.status ||
+          item.status ??
           null,
+
+        year:
+          item.year ??
+          null,
+
         lastChapter:
           item.last_chapter ??
           null,
+
         contentRating:
           item.content_rating ||
           "safe",
+
         source: "comick"
       }));
 
@@ -200,21 +200,23 @@ app.get("/api/search", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Comick search error:", error);
+    console.error(
+      "Comick search error:",
+      error.message
+    );
 
     res.status(502).json({
       error: "Comick search is temporarily unavailable.",
-      source: "comick"
+      source: "comick",
+      details: error.message
     });
   }
 });
 
-/* -------------------------------------------------------
-   TITLE DETAILS
-------------------------------------------------------- */
+/* ---------------- TITLE ---------------- */
 
 app.get("/api/source/comick/title/:hid", async (req, res) => {
-  const hid = safeText(req.params.hid).trim();
+  const hid = text(req.params.hid).trim();
 
   if (!hid) {
     return res.status(400).json({
@@ -224,7 +226,7 @@ app.get("/api/source/comick/title/:hid", async (req, res) => {
 
   try {
     const data = await fetchJson(
-      `${COMICK_API}/comic/${encodeURIComponent(hid)}`
+      `${COMICK_API}/api/comic/${encodeURIComponent(hid)}`
     );
 
     const comic =
@@ -234,26 +236,57 @@ app.get("/api/source/comick/title/:hid", async (req, res) => {
 
     res.json({
       source: "comick",
-      id: comic.hid || hid,
-      hid: comic.hid || hid,
-      slug: comic.slug || "",
-      title: comic.title || "Unknown title",
+
+      id:
+        comic.hid ||
+        hid,
+
+      hid:
+        comic.hid ||
+        hid,
+
+      slug:
+        comic.slug ||
+        "",
+
+      title:
+        comic.title ||
+        "Unknown title",
+
       description:
         comic.desc ||
         comic.description ||
         "",
-      cover: getCover(comic),
-      country: comic.country || "",
-      status: comic.status || null,
-      year: comic.year || null,
-      lastChapter: comic.last_chapter ?? null,
+
+      cover:
+        cover(comic),
+
+      country:
+        comic.country ||
+        "",
+
+      status:
+        comic.status ??
+        null,
+
+      year:
+        comic.year ??
+        null,
+
+      lastChapter:
+        comic.last_chapter ??
+        null,
+
       contentRating:
         comic.content_rating ||
         "safe"
     });
 
   } catch (error) {
-    console.error("Title error:", error);
+    console.error(
+      "Title error:",
+      error.message
+    );
 
     res.status(502).json({
       error: "Could not load title.",
@@ -262,259 +295,259 @@ app.get("/api/source/comick/title/:hid", async (req, res) => {
   }
 });
 
-/* -------------------------------------------------------
-   CHAPTER LIST
-------------------------------------------------------- */
-
-app.get("/api/source/comick/title/:hid/chapters", async (req, res) => {
-  const hid = safeText(req.params.hid).trim();
-
-  if (!hid) {
-    return res.status(400).json({
-      error: "Missing title ID"
-    });
-  }
-
-  const lang = safeText(req.query.lang) || "en";
-  const page = Number(req.query.page || 1);
-
-  try {
-    const url =
-      `${COMICK_API}/comic/${encodeURIComponent(hid)}/chapters` +
-      `?lang=${encodeURIComponent(lang)}` +
-      `&page=${page}` +
-      `&chap-order=0`;
-
-    const data = await fetchJson(url);
-
-    const raw =
-      Array.isArray(data?.chapters)
-        ? data.chapters
-        : Array.isArray(data)
-          ? data
-          : [];
-
-    const chapters = raw.map((chapter, index) => ({
-      id:
-        chapter.hid ||
-        chapter.id ||
-        `${hid}-${index}`,
-
-      hid:
-        chapter.hid ||
-        "",
-
-      chapter:
-        chapter.chap ??
-        "",
-
-      title:
-        chapter.title ||
-        "",
-
-      volume:
-        chapter.vol ??
-        null,
-
-      language:
-        chapter.lang ||
-        lang,
-
-      group:
-        Array.isArray(chapter.group_name)
-          ? chapter.group_name.join(", ")
-          : safeText(chapter.group_name),
-
-      publishedAt:
-        chapter.publish_at ||
-        chapter.created_at ||
-        null
-    }));
-
-    res.json({
-      source: "comick",
-      titleId: hid,
-      language: lang,
-      page,
-      chapters
-    });
-
-  } catch (error) {
-    console.error("Chapter list error:", error);
-
-    res.status(502).json({
-      error: "Could not load chapters.",
-      source: "comick"
-    });
-  }
-});
-
-/* -------------------------------------------------------
-   CHAPTER PAGES
-------------------------------------------------------- */
+/* ---------------- CHAPTERS ---------------- */
 
 app.get(
-  "/api/source/comick/chapter/:chapterHid",
+  "/api/source/comick/title/:hid/chapters",
   async (req, res) => {
-    const chapterHid =
-      safeText(req.params.chapterHid).trim();
 
-    if (!chapterHid) {
+    const hid = text(req.params.hid).trim();
+
+    if (!hid) {
       return res.status(400).json({
-        error: "Missing chapter ID"
+        error: "Missing title ID"
       });
     }
 
+    const lang =
+      text(req.query.lang) ||
+      "en";
+
+    const page =
+      Number(req.query.page || 1);
+
     try {
-      /*
-       * Comick's chapter page exposes md_images.
-       * We first try the public API.
-       */
+      const url =
+        `${COMICK_API}/api/comic/` +
+        `${encodeURIComponent(hid)}/chapters` +
+        `?lang=${encodeURIComponent(lang)}` +
+        `&page=${page}` +
+        `&chap-order=0` +
+        `&limit=100`;
 
-      let data = null;
+      const data =
+        await fetchJson(url);
 
-      try {
-        data = await fetchJson(
-          `${COMICK_API}/chapter/${encodeURIComponent(chapterHid)}`
-        );
-      } catch {
-        // Some API versions expose chapter information
-        // through the website page instead.
-      }
+      const raw =
+        Array.isArray(data)
+          ? data
+          : Array.isArray(data.chapters)
+            ? data.chapters
+            : [];
 
-      let images = [];
+      const chapters =
+        raw.map((chapter, index) => ({
+          id:
+            chapter.hid ||
+            chapter.id ||
+            `${hid}-${index}`,
 
-      const chapter =
-        data?.chapter ||
-        data?.data?.chapter ||
-        data;
+          hid:
+            chapter.hid ||
+            "",
 
-      if (Array.isArray(chapter?.md_images)) {
-        images = chapter.md_images.map((image, index) => ({
-          number: index + 1,
-          url: image.url ||
-            `${IMAGE_HOST}/${image.b2key}`,
-          b2key: image.b2key || ""
+          chapter:
+            chapter.chap ??
+            "",
+
+          title:
+            chapter.title ||
+            "",
+
+          volume:
+            chapter.vol ??
+            null,
+
+          language:
+            chapter.lang ||
+            lang,
+
+          group:
+            Array.isArray(
+              chapter.group_name
+            )
+              ? chapter.group_name.join(", ")
+              : text(chapter.group_name),
+
+          publishedAt:
+            chapter.publish_at ||
+            chapter.created_at ||
+            null
         }));
-      }
-
-      /*
-       * Fallback:
-       * fetch the Comick chapter page and read __NEXT_DATA__.
-       */
-
-      if (!images.length) {
-        const pageUrl =
-          `${COMICK_SITE}/comic/${encodeURIComponent(chapterHid)}`;
-
-        try {
-          const html = await fetchText(pageUrl);
-
-          const match =
-            html.match(
-              /<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/
-            );
-
-          if (match) {
-            const nextData =
-              JSON.parse(match[1]);
-
-            const pageChapter =
-              nextData?.props?.pageProps?.chapter;
-
-            if (
-              Array.isArray(
-                pageChapter?.md_images
-              )
-            ) {
-              images =
-                pageChapter.md_images.map(
-                  (image, index) => ({
-                    number: index + 1,
-                    url:
-                      image.url ||
-                      `${IMAGE_HOST}/${image.b2key}`,
-                    b2key:
-                      image.b2key || ""
-                  })
-                );
-            }
-          }
-        } catch (fallbackError) {
-          console.error(
-            "Chapter page fallback error:",
-            fallbackError.message
-          );
-        }
-      }
-
-      if (!images.length) {
-        return res.status(404).json({
-          error: "No reader pages were found.",
-          chapterId: chapterHid,
-          source: "comick"
-        });
-      }
 
       res.json({
         source: "comick",
-        chapterId: chapterHid,
-        pageCount: images.length,
-        pages: images
+        titleId: hid,
+        language: lang,
+        page,
+        chapters
       });
 
     } catch (error) {
-      console.error("Reader error:", error);
+      console.error(
+        "Chapter error:",
+        error.message
+      );
 
       res.status(502).json({
-        error: "Could not load reader pages.",
+        error: "Could not load chapters.",
         source: "comick"
       });
     }
   }
 );
 
-/* -------------------------------------------------------
-   SIMPLE IMAGE PROXY
-------------------------------------------------------- */
+/* ---------------- CHAPTER PAGES ---------------- */
+
+app.get(
+  "/api/source/comick/chapter/:hid",
+  async (req, res) => {
+
+    const hid =
+      text(req.params.hid).trim();
+
+    if (!hid) {
+      return res.status(400).json({
+        error: "Missing chapter ID"
+      });
+    }
+
+    try {
+      const data = await fetchJson(
+        `${COMICK_API}/api/chapter/${encodeURIComponent(hid)}`
+      );
+
+      const chapter =
+        data?.chapter ||
+        data?.data?.chapter ||
+        data;
+
+      let pages = [];
+
+      if (
+        Array.isArray(
+          chapter?.md_images
+        )
+      ) {
+        pages =
+          chapter.md_images.map(
+            (image, index) => ({
+              number: index + 1,
+
+              url:
+                image.url ||
+                `${IMAGE_HOST}/${image.b2key}`,
+
+              b2key:
+                image.b2key ||
+                ""
+            })
+          );
+      }
+
+      /*
+        Some API responses expose the
+        image URLs directly.
+      */
+
+      if (
+        !pages.length &&
+        Array.isArray(data?.pages)
+      ) {
+        pages =
+          data.pages.map(
+            (url, index) => ({
+              number: index + 1,
+              url:
+                typeof url === "string"
+                  ? url
+                  : url.url || "",
+              b2key: ""
+            })
+          );
+      }
+
+      if (!pages.length) {
+        return res.status(404).json({
+          error:
+            "No reader pages were found.",
+          chapterId: hid,
+          source: "comick"
+        });
+      }
+
+      res.json({
+        source: "comick",
+        chapterId: hid,
+        pageCount: pages.length,
+        pages
+      });
+
+    } catch (error) {
+      console.error(
+        "Reader error:",
+        error.message
+      );
+
+      res.status(502).json({
+        error:
+          "Could not load reader pages.",
+        source: "comick"
+      });
+    }
+  }
+);
+
+/* ---------------- IMAGE PROXY ---------------- */
 
 app.get("/api/image", async (req, res) => {
-  const imageUrl = safeText(req.query.url).trim();
+  const imageUrl =
+    text(req.query.url).trim();
 
   if (!imageUrl) {
-    return res.status(400).send("Missing image URL");
+    return res.status(400).send(
+      "Missing image URL"
+    );
   }
 
   try {
-    const parsed = new URL(imageUrl);
+    const parsed =
+      new URL(imageUrl);
 
-    const allowedHosts = [
+    if (
+      parsed.hostname !==
       "meo.comick.pictures"
-    ];
-
-    if (!allowedHosts.includes(parsed.hostname)) {
-      return res.status(403).send("Image host not allowed");
+    ) {
+      return res.status(403).send(
+        "Image host not allowed"
+      );
     }
 
-    const response = await fetch(imageUrl, {
-      headers: {
-        Referer: `${COMICK_SITE}/`,
-        "User-Agent": USER_AGENT
-      }
-    });
+    const response =
+      await fetch(imageUrl, {
+        headers: {
+          Referer: `${COMICK_API}/`,
+          "User-Agent": USER_AGENT
+        }
+      });
 
     if (!response.ok) {
-      return res
-        .status(response.status)
-        .send("Could not load image");
+      return res.status(
+        response.status
+      ).send(
+        "Could not load image"
+      );
     }
 
     const contentType =
-      response.headers.get("content-type") ||
-      "image/jpeg";
+      response.headers.get(
+        "content-type"
+      ) || "image/jpeg";
 
     const buffer =
-      Buffer.from(await response.arrayBuffer());
+      Buffer.from(
+        await response.arrayBuffer()
+      );
 
     res.setHeader(
       "Content-Type",
@@ -534,53 +567,44 @@ app.get("/api/image", async (req, res) => {
     res.send(buffer);
 
   } catch (error) {
-    console.error("Image proxy error:", error);
-    res.status(500).send("Image proxy error");
+    console.error(
+      "Image proxy error:",
+      error.message
+    );
+
+    res.status(500).send(
+      "Image proxy error"
+    );
   }
 });
 
-/* -------------------------------------------------------
-   OLD DEMO ROUTES
-   Kept so your current frontend does not suddenly break.
-------------------------------------------------------- */
+/* ---------------- OLD COMPATIBILITY ROUTES ---------------- */
 
-app.get("/api/title/:id", async (req, res) => {
-  const id = req.params.id;
-
-  if (id === "solo-leveling") {
-    return res.json({
-      id: "solo-leveling",
-      title: "Solo Leveling",
-      description:
-        "Demo compatibility title. Use the Comick source for live data.",
-      cover: "",
-      source: "demo"
-    });
-  }
-
-  res.status(404).json({
-    error: "Use the Comick source endpoints for live titles."
+app.get("/api/title/:id", (req, res) => {
+  res.status(410).json({
+    error:
+      "This is an old demo endpoint. Use /api/source/comick/title/:hid"
   });
 });
 
 app.get("/api/title/:id/chapters", (req, res) => {
-  res.json({
-    id: req.params.id,
-    chapters: []
+  res.status(410).json({
+    error:
+      "Use the Comick chapter endpoint."
   });
 });
 
-app.get("/api/title/:id/chapter/:chapter", (req, res) => {
-  res.json({
-    id: req.params.id,
-    chapter: req.params.chapter,
-    pages: []
-  });
-});
+app.get(
+  "/api/title/:id/chapter/:chapter",
+  (req, res) => {
+    res.status(410).json({
+      error:
+        "Use the Comick reader endpoint."
+    });
+  }
+);
 
-/* -------------------------------------------------------
-   Error handler
-------------------------------------------------------- */
+/* ---------------- ERROR HANDLER ---------------- */
 
 app.use((err, req, res, next) => {
   console.error(err);
@@ -590,9 +614,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-/* -------------------------------------------------------
-   Start
-------------------------------------------------------- */
+/* ---------------- START ---------------- */
 
 app.listen(PORT, () => {
   console.log(
