@@ -1,6 +1,6 @@
 {
   "name": "zyomira-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Zyomira manga, manhwa and manhua backend",
   "main": "server.js",
   "scripts": {
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "protobufjs": "^7.5.3"
   }
-} 
+}
