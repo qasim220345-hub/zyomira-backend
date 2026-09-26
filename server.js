@@ -5,20 +5,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-const COMIX_API = "https://comix-api.vercel.app/api";
+const MDX = "https://api.mangadex.org";
+const SOURCE = "mangadex";
 
-function absoluteImage(url) {
-  if (!url) return "";
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return url;
-  }
-
-  if (url.startsWith("/")) {
-    return "https://comix-api.vercel.app" + url;
-  }
-
-  return "https://comix-api.vercel.app/" + url;
-}
+/* ---------------- HELPERS ---------------- */
 
 async function fetchJSON(url) {
   const response = await fetch(url, {
@@ -36,19 +26,114 @@ async function fetchJSON(url) {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      `Comix API returned invalid JSON (${response.status})`
+      `MangaDex returned invalid JSON (${response.status})`
     );
   }
 
   if (!response.ok) {
     throw new Error(
-      data?.error ||
+      data?.errors?.[0]?.detail ||
       data?.message ||
-      `Comix API HTTP ${response.status}`
+      `MangaDex HTTP ${response.status}`
     );
   }
 
   return data;
+}
+
+function textValue(value) {
+  if (!value) return "";
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "object") {
+    return (
+      value.en ||
+      Object.values(value)[0] ||
+      ""
+    );
+  }
+
+  return String(value);
+}
+
+function getTitle(attributes) {
+  const title = attributes?.title;
+
+  return (
+    textValue(title) ||
+    "Unknown title"
+  );
+}
+
+function getDescription(attributes) {
+  const description =
+    attributes?.description;
+
+  return textValue(description);
+}
+
+function getCover(manga) {
+  const relationships =
+    manga.relationships || [];
+
+  const cover = relationships.find(
+    (rel) => rel.type === "cover_art"
+  );
+
+  if (!cover?.id) return "";
+
+  const fileName =
+    cover.attributes?.fileName;
+
+  if (!fileName) return "";
+
+  return (
+    `https://uploads.mangadex.org/covers/` +
+    `${manga.id}/${fileName}`
+  );
+}
+
+function getAuthor(manga) {
+  const relationships =
+    manga.relationships || [];
+
+  const author = relationships.find(
+    (rel) => rel.type === "author"
+  );
+
+  return (
+    author?.attributes?.name ||
+    ""
+  );
+}
+
+function getArtist(manga) {
+  const relationships =
+    manga.relationships || [];
+
+  const artist = relationships.find(
+    (rel) => rel.type === "artist"
+  );
+
+  return (
+    artist?.attributes?.name ||
+    ""
+  );
+}
+
+/*
+  Zyomira only shows safe-rated titles.
+  This prevents the source's adult-rated entries
+  from being exposed by the app.
+*/
+function isSafeManga(manga) {
+  const rating =
+    manga?.attributes?.contentRating;
+
+  return rating === "safe";
 }
 
 /* ---------------- HOME ---------------- */
@@ -57,7 +142,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "Zyomira backend",
-    source: "comix"
+    source: SOURCE
   });
 });
 
@@ -65,64 +150,19 @@ app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     service: "Zyomira backend",
-    source: "comix"
+    source: SOURCE
   });
-});
-
-/* ---------------- COMIX HOME ---------------- */
-
-app.get("/api/comix/home", async (req, res) => {
-  try {
-    const data = await fetchJSON(
-      `${COMIX_API}/manga/home?sfw=true`
-    );
-
-    const popular = Array.isArray(data?.popular)
-      ? data.popular
-      : [];
-
-    const latest = Array.isArray(data?.latest)
-      ? data.latest
-      : [];
-
-    const normalize = (item) => ({
-      id: String(item.id || ""),
-      hid: String(item.id || ""),
-      slug: String(item.id || ""),
-      title: item.title || "Unknown title",
-      description: item.description || "",
-      cover: absoluteImage(item.cover || item.img),
-      thumbnail: absoluteImage(item.cover || item.img),
-      chapter: item.chapter || "",
-      status: item.status ?? null,
-      score: item.score ?? null,
-      type: item.type || "manga",
-      source: "comix"
-    });
-
-    res.json({
-      source: "comix",
-      popular: popular.map(normalize),
-      latest: latest.map(normalize)
-    });
-  } catch (error) {
-    console.error("HOME ERROR:", error.message);
-
-    res.status(502).json({
-      error: "Could not load Comix home.",
-      details: error.message
-    });
-  }
 });
 
 /* ---------------- SEARCH ---------------- */
 
 app.get("/api/search", async (req, res) => {
-  const q = String(req.query.q || "").trim();
+  const q =
+    String(req.query.q || "").trim();
 
   if (!q) {
     return res.json({
-      source: "comix",
+      source: SOURCE,
       query: "",
       count: 0,
       results: []
@@ -130,101 +170,112 @@ app.get("/api/search", async (req, res) => {
   }
 
   try {
-    /* Primary search */
-    const searchURL =
-      `${COMIX_API}/manga/search?q=` +
-      encodeURIComponent(q) +
-      `&sfw=true`;
+    const params = new URLSearchParams();
 
-    let data = await fetchJSON(searchURL);
-
-    let results = Array.isArray(data?.results)
-      ? data.results
-      : [];
+    params.set("title", q);
+    params.set("limit", "20");
 
     /*
-      If search returns nothing, try browse.
-      This does NOT magically turn browse into search,
-      but gives Zyomira a useful fallback if the API
-      search endpoint temporarily returns an empty list.
+      Ask MangaDex to include cover information.
     */
+    params.append(
+      "includes[]",
+      "cover_art"
+    );
 
-    if (!results.length) {
-      try {
-        const browseData = await fetchJSON(
-          `${COMIX_API}/manga/browse?sfw=true&page=1&limit=50`
-        );
+    params.append(
+      "includes[]",
+      "author"
+    );
 
-        const browseResults = Array.isArray(browseData?.results)
-          ? browseData.results
-          : [];
+    params.append(
+      "includes[]",
+      "artist"
+    );
 
-        const queryLower = q.toLowerCase();
+    /*
+      Only safe-rated manga.
+    */
+    params.append(
+      "contentRating[]",
+      "safe"
+    );
 
-        results = browseResults.filter((item) => {
-          const title = String(
-            item.title || ""
-          ).toLowerCase();
+    const data = await fetchJSON(
+      `${MDX}/manga?${params.toString()}`
+    );
 
-          return title.includes(queryLower);
-        });
-      } catch (fallbackError) {
-        console.log(
-          "Browse fallback failed:",
-          fallbackError.message
-        );
-      }
-    }
+    const mangaList =
+      Array.isArray(data?.data)
+        ? data.data
+        : [];
 
-    const normalized = results
-      .filter(Boolean)
-      .map((item) => ({
-        id: String(item.id || ""),
-        hid: String(item.id || ""),
-        slug: String(item.id || ""),
+    const results =
+      mangaList.map((manga) => {
+        const attributes =
+          manga.attributes || {};
 
-        title: item.title || "Unknown title",
+        return {
+          id: manga.id,
+          hid: manga.id,
+          slug: manga.id,
 
-        description:
-          item.description ||
-          item.synopsis ||
-          "",
+          title:
+            getTitle(attributes),
 
-        cover: absoluteImage(
-          item.cover || item.img
-        ),
+          description:
+            getDescription(attributes),
 
-        thumbnail: absoluteImage(
-          item.cover || item.img
-        ),
+          synopsis:
+            getDescription(attributes),
 
-        status: item.status ?? null,
-        score: item.score ?? null,
+          cover:
+            getCover(manga),
 
-        type:
-          item.type ||
-          "manga",
+          thumbnail:
+            getCover(manga),
 
-        source: "comix"
-      }))
-      .filter((item) => item.id);
+          author:
+            getAuthor(manga),
+
+          artist:
+            getArtist(manga),
+
+          status:
+            attributes.status || null,
+
+          year:
+            attributes.year || null,
+
+          type: "manga",
+
+          content_rating:
+            attributes.contentRating ||
+            "safe",
+
+          source: SOURCE
+        };
+      });
 
     res.json({
-      source: "comix",
+      source: SOURCE,
       query: q,
-      count: normalized.length,
-      results: normalized
+      count: results.length,
+      results
     });
 
   } catch (error) {
-    console.error("SEARCH ERROR:", error.message);
+    console.error(
+      "SEARCH ERROR:",
+      error.message
+    );
 
     res.status(502).json({
-      source: "comix",
+      source: SOURCE,
       query: q,
       count: 0,
       results: [],
-      error: "Comix search failed.",
+      error: "MangaDex search failed.",
       details: error.message
     });
   }
@@ -232,95 +283,115 @@ app.get("/api/search", async (req, res) => {
 
 /* ---------------- DETAILS ---------------- */
 
-app.get("/api/source/comix/title/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
+app.get(
+  "/api/source/comix/title/:id",
+  async (req, res) => {
+    try {
+      const id = req.params.id;
 
-    const data = await fetchJSON(
-      `${COMIX_API}/manga/${encodeURIComponent(id)}?sfw=true`
-    );
+      const params = new URLSearchParams();
 
-    const comic =
-      data?.comic ||
-      data?.manga ||
-      data;
+      params.append(
+        "includes[]",
+        "cover_art"
+      );
 
-    if (!comic || !comic.id) {
-      return res.status(404).json({
-        error: "Manga not found."
+      params.append(
+        "includes[]",
+        "author"
+      );
+
+      params.append(
+        "includes[]",
+        "artist"
+      );
+
+      const data = await fetchJSON(
+        `${MDX}/manga/${encodeURIComponent(id)}?${params.toString()}`
+      );
+
+      const manga = data?.data;
+
+      if (!manga) {
+        return res.status(404).json({
+          error: "Manga not found."
+        });
+      }
+
+      if (!isSafeManga(manga)) {
+        return res.status(403).json({
+          error: "This title is not available."
+        });
+      }
+
+      const attributes =
+        manga.attributes || {};
+
+      res.json({
+        source: SOURCE,
+
+        id: manga.id,
+
+        title:
+          getTitle(attributes),
+
+        description:
+          getDescription(attributes),
+
+        synopsis:
+          getDescription(attributes),
+
+        cover:
+          getCover(manga),
+
+        thumbnail:
+          getCover(manga),
+
+        author:
+          getAuthor(manga),
+
+        artist:
+          getArtist(manga),
+
+        status:
+          attributes.status || null,
+
+        year:
+          attributes.year || null,
+
+        genres:
+          Array.isArray(attributes.tags)
+            ? attributes.tags
+                .map(
+                  (tag) =>
+                    textValue(
+                      tag?.attributes?.name
+                    )
+                )
+                .filter(Boolean)
+            : [],
+
+        type: "manga",
+
+        content_rating:
+          attributes.contentRating ||
+          "safe"
+      });
+
+    } catch (error) {
+      console.error(
+        "DETAIL ERROR:",
+        error.message
+      );
+
+      res.status(502).json({
+        error:
+          "Could not load manga details.",
+        details: error.message
       });
     }
-
-    res.json({
-      source: "comix",
-
-      id: String(comic.id),
-
-      title:
-        comic.title ||
-        "Unknown title",
-
-      description:
-        comic.description ||
-        comic.synopsis ||
-        "",
-
-      synopsis:
-        comic.synopsis ||
-        comic.description ||
-        "",
-
-      cover: absoluteImage(
-        comic.cover ||
-        comic.img
-      ),
-
-      thumbnail: absoluteImage(
-        comic.cover ||
-        comic.img
-      ),
-
-      author:
-        comic.author ||
-        comic.authors ||
-        "",
-
-      artist:
-        comic.artist ||
-        comic.artists ||
-        "",
-
-      genres:
-        Array.isArray(comic.genres)
-          ? comic.genres
-          : [],
-
-      status:
-        comic.status ??
-        null,
-
-      type:
-        comic.type ||
-        "manga",
-
-      score:
-        comic.score ??
-        null,
-
-      content_rating:
-        comic.content_rating ||
-        "safe"
-    });
-
-  } catch (error) {
-    console.error("DETAIL ERROR:", error.message);
-
-    res.status(502).json({
-      error: "Could not load manga details.",
-      details: error.message
-    });
   }
-});
+);
 
 /* ---------------- CHAPTERS ---------------- */
 
@@ -328,7 +399,8 @@ app.get(
   "/api/source/comix/title/:id/chapters",
   async (req, res) => {
     try {
-      const id = req.params.id;
+      const mangaId =
+        req.params.id;
 
       const page = Math.max(
         1,
@@ -343,65 +415,115 @@ app.get(
         )
       );
 
-      const data = await fetchJSON(
-        `${COMIX_API}/manga/${encodeURIComponent(id)}/chapters` +
-        `?page=${page}&limit=${limit}`
+      const offset =
+        (page - 1) * limit;
+
+      const params =
+        new URLSearchParams();
+
+      params.set(
+        "limit",
+        String(limit)
       );
 
-      const chapters = Array.isArray(data?.chapters)
-        ? data.chapters
-        : Array.isArray(data)
-          ? data
+      params.set(
+        "offset",
+        String(offset)
+      );
+
+      /*
+        English chapters only.
+      */
+      params.append(
+        "translatedLanguage[]",
+        "en"
+      );
+
+      /*
+        Newest chapters first.
+      */
+      params.set(
+        "order[publishAt]",
+        "desc"
+      );
+
+      /*
+        Include the scanlation group.
+      */
+      params.append(
+        "includes[]",
+        "scanlation_group"
+      );
+
+      const data = await fetchJSON(
+        `${MDX}/manga/${encodeURIComponent(mangaId)}/feed?${params.toString()}`
+      );
+
+      const chapters =
+        Array.isArray(data?.data)
+          ? data.data
           : [];
 
-      const normalized = chapters
-        .map((chapter) => ({
-          id: String(
-            chapter.id ||
-            chapter.chapter_id ||
-            chapter.chapterId ||
-            ""
-          ),
+      const normalized =
+        chapters
+          .map((chapter) => {
+            const attributes =
+              chapter.attributes || {};
 
-          chapter:
-            chapter.chapter ??
-            chapter.number ??
-            chapter.chapter_number ??
-            "",
+            const group =
+              (chapter.relationships || [])
+                .find(
+                  (rel) =>
+                    rel.type ===
+                    "scanlation_group"
+                );
 
-          number:
-            chapter.number ??
-            chapter.chapter ??
-            chapter.chapter_number ??
-            "",
+            return {
+              id: chapter.id,
 
-          title:
-            chapter.title ||
-            "",
+              chapter:
+                attributes.chapter ??
+                "",
 
-          volume:
-            chapter.volume ??
-            null,
+              number:
+                attributes.chapter ??
+                "",
 
-          scanlationGroup:
-            chapter.scanlation_group ||
-            chapter.group ||
-            chapter.scanlator_name ||
-            null,
+              title:
+                attributes.title ||
+                "",
 
-          uploadedAt:
-            chapter.uploaded_at ||
-            chapter.created_at ||
-            chapter.date_added ||
-            null,
+              volume:
+                attributes.volume ??
+                null,
 
-          source: "comix"
-        }))
-        .filter((chapter) => chapter.id);
+              scanlationGroup:
+                group?.attributes?.name ||
+                null,
+
+              uploadedAt:
+                attributes.publishAt ||
+                null,
+
+              language:
+                attributes.translatedLanguage ||
+                "en",
+
+              pages:
+                attributes.pages ||
+                0,
+
+              source: SOURCE
+            };
+          })
+          .filter(
+            (chapter) =>
+              chapter.id
+          );
 
       res.json({
-        source: "comix",
-        mangaId: id,
+        source: SOURCE,
+        mangaId,
         page,
         limit,
         count: normalized.length,
@@ -415,7 +537,8 @@ app.get(
       );
 
       res.status(502).json({
-        error: "Could not load chapters.",
+        error:
+          "Could not load chapters.",
         details: error.message
       });
     }
@@ -429,58 +552,74 @@ app.get(
   async (req, res) => {
     try {
       const chapterId =
-        String(req.params.chapterId);
+        req.params.chapterId;
 
+      /*
+        MangaDex@Home provides the actual
+        page server and filenames.
+      */
       const data = await fetchJSON(
-        `${COMIX_API}/manga/read?chapterId=` +
-        encodeURIComponent(chapterId)
+        `${MDX}/at-home/server/${encodeURIComponent(chapterId)}`
       );
 
-      const images =
-        Array.isArray(data?.images)
-          ? data.images
+      if (
+        data?.result !== "ok" ||
+        !data?.baseUrl ||
+        !data?.chapter
+      ) {
+        return res.status(404).json({
+          error:
+            "MangaDex did not provide chapter pages.",
+          chapterId,
+          pages: []
+        });
+      }
+
+      const baseUrl =
+        data.baseUrl;
+
+      const hash =
+        data.chapter.hash;
+
+      /*
+        Use the normal image quality.
+      */
+      const files =
+        Array.isArray(
+          data.chapter.data
+        )
+          ? data.chapter.data
           : [];
 
-      const pages = images
-        .map((image, index) => {
-          const rawURL =
-            typeof image === "string"
-              ? image
-              : image?.url ||
-                image?.src ||
-                "";
-
-          return {
+      const pages =
+        files.map(
+          (fileName, index) => ({
             index,
-            url: absoluteImage(rawURL),
-            width:
-              typeof image === "object"
-                ? image.width || null
-                : null,
-            height:
-              typeof image === "object"
-                ? image.height || null
-                : null
-          };
-        })
-        .filter((page) => page.url);
+
+            url:
+              `${baseUrl}/data/` +
+              `${hash}/` +
+              `${fileName}`,
+
+            width: null,
+            height: null
+          })
+        );
 
       if (!pages.length) {
         return res.status(404).json({
           error:
-            "No chapter page images were returned.",
+            "This chapter has no readable pages.",
           chapterId,
           pages: []
         });
       }
 
       res.json({
-        source: "comix",
+        source: SOURCE,
         chapterId,
         count: pages.length,
-        total_images:
-          data?.total_images ??
-          pages.length,
+        total_images: pages.length,
         pages
       });
 
@@ -493,7 +632,9 @@ app.get(
       res.status(502).json({
         error:
           "Could not load chapter pages.",
-        chapterId: req.params.chapterId,
+        chapterId:
+          req.params.chapterId,
+        pages: [],
         details: error.message
       });
     }
@@ -502,139 +643,155 @@ app.get(
 
 /* ---------------- IMAGE PROXY ---------------- */
 
-app.get("/api/image", async (req, res) => {
-  const imageURL =
-    String(req.query.url || "").trim();
+app.get(
+  "/api/image",
+  async (req, res) => {
+    const imageURL =
+      String(
+        req.query.url || ""
+      ).trim();
 
-  if (!imageURL) {
-    return res.status(400).send(
-      "Missing image URL"
-    );
-  }
-
-  try {
-    const response = await fetch(
-      imageURL,
-      {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 Zyomira/1.0",
-          "Referer":
-            "https://comix.to/"
-        }
-      }
-    );
-
-    if (!response.ok) {
-      return res.status(
-        response.status
-      ).send(
-        `Image request failed: ${response.status}`
+    if (!imageURL) {
+      return res.status(400).send(
+        "Missing image URL"
       );
     }
 
-    const buffer =
-      Buffer.from(
-        await response.arrayBuffer()
+    try {
+      const response =
+        await fetch(imageURL, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 Zyomira/1.0",
+            "Referer":
+              "https://mangadex.org/"
+          }
+        });
+
+      if (!response.ok) {
+        return res.status(
+          response.status
+        ).send(
+          `Image request failed: ${response.status}`
+        );
+      }
+
+      const buffer =
+        Buffer.from(
+          await response.arrayBuffer()
+        );
+
+      res.set(
+        "Content-Type",
+        response.headers.get(
+          "content-type"
+        ) ||
+          "image/jpeg"
       );
 
-    res.set(
-      "Content-Type",
-      response.headers.get(
-        "content-type"
-      ) || "image/jpeg"
-    );
+      res.set(
+        "Cache-Control",
+        "public, max-age=86400"
+      );
 
-    res.set(
-      "Cache-Control",
-      "public, max-age=86400"
-    );
+      res.set(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
 
-    res.set(
-      "Access-Control-Allow-Origin",
-      "*"
-    );
+      res.send(buffer);
 
-    res.send(buffer);
+    } catch (error) {
+      console.error(
+        "IMAGE ERROR:",
+        error.message
+      );
 
-  } catch (error) {
-    console.error(
-      "IMAGE ERROR:",
-      error.message
-    );
-
-    res.status(502).send(
-      "Could not load image."
-    );
+      res.status(502).send(
+        "Could not load image."
+      );
+    }
   }
-});
+);
 
 /* ---------------- SOURCES ---------------- */
 
-app.get("/api/sources", (req, res) => {
-  res.json({
-    sources: [
-      {
-        id: "comix",
-        name: "Comix",
-        enabled: true,
-        search: true,
-        details: true,
-        chapters: true,
-        reader: true,
-        types: [
-          "manga",
-          "manhwa",
-          "manhua"
-        ]
-      }
-    ]
-  });
-});
+app.get(
+  "/api/sources",
+  (req, res) => {
+    res.json({
+      sources: [
+        {
+          id: SOURCE,
+          name: "MangaDex",
+
+          enabled: true,
+
+          search: true,
+          details: true,
+          chapters: true,
+          reader: true,
+
+          types: [
+            "manga"
+          ]
+        }
+      ]
+    });
+  }
+);
 
 /* ---------------- REPOSITORY ---------------- */
 
-app.get("/api/repository", (req, res) => {
-  res.json({
-    name: "Zyomira Repository",
-    version: 3,
+app.get(
+  "/api/repository",
+  (req, res) => {
+    res.json({
+      name: "Zyomira Repository",
+      version: 4,
 
-    extensions: [
-      {
-        id: "comix",
-        name: "Comix",
-        type: "manga",
+      extensions: [
+        {
+          id: SOURCE,
+          name: "MangaDex",
 
-        supports: [
-          "manga",
-          "manhwa",
-          "manhua"
-        ],
+          type: "manga",
 
-        reader: true,
-        enabled: true
-      }
-    ]
-  });
-});
+          supports: [
+            "manga"
+          ],
+
+          reader: true,
+          enabled: true
+        }
+      ]
+    });
+  }
+);
 
 /* ---------------- ERROR HANDLER ---------------- */
 
-app.use((err, req, res, next) => {
-  console.error(
-    "SERVER ERROR:",
-    err
-  );
+app.use(
+  (err, req, res, next) => {
+    console.error(
+      "SERVER ERROR:",
+      err
+    );
 
-  res.status(500).json({
-    error: "Internal server error."
-  });
-});
+    res.status(500).json({
+      error:
+        "Internal server error."
+    });
+  }
+);
 
 /* ---------------- START ---------------- */
 
-app.listen(PORT, () => {
-  console.log(
-    `Zyomira backend running on port ${PORT}`
-  );
-});
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      `Zyomira MangaDex backend running on port ${PORT}`
+    );
+  }
+);
