@@ -6,12 +6,15 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 // ===============================
-// CORS FIX
+// CORS
 // ===============================
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
@@ -25,6 +28,11 @@ app.use((req, res, next) => {
 // ===============================
 const MDX = "https://api.mangadex.org";
 const SOURCE = "mangadex";
+
+const MD_HEADERS = {
+  "User-Agent": "Zyomira/1.0",
+  "Accept": "application/json"
+};
 
 // ===============================
 // HOME
@@ -74,10 +82,14 @@ app.get("/api/search", async (req, res) => {
       "&includes[]=artist" +
       "&contentRating[]=safe";
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: MD_HEADERS
+    });
 
     if (!response.ok) {
-      throw new Error("MangaDex returned " + response.status);
+      throw new Error(
+        "MangaDex search returned " + response.status
+      );
     }
 
     const data = await response.json();
@@ -92,7 +104,9 @@ app.get("/api/search", async (req, res) => {
       count: results.length,
       results
     });
+
   } catch (error) {
+
     console.error("Search error:", error);
 
     res.status(500).json({
@@ -107,6 +121,7 @@ app.get("/api/search", async (req, res) => {
 // ===============================
 app.get("/api/source/comix/title/:id", async (req, res) => {
   try {
+
     const id = req.params.id;
 
     const url =
@@ -117,7 +132,9 @@ app.get("/api/source/comix/title/:id", async (req, res) => {
       "&includes[]=author" +
       "&includes[]=artist";
 
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: MD_HEADERS
+    });
 
     if (!response.ok) {
       return res.status(response.status).json({
@@ -126,16 +143,23 @@ app.get("/api/source/comix/title/:id", async (req, res) => {
     }
 
     const data = await response.json();
-    const manga = normalizeManga(data.data);
 
-    if (!manga || manga.content_rating !== "safe") {
+    const manga =
+      normalizeManga(data.data);
+
+    if (
+      !manga ||
+      manga.content_rating !== "safe"
+    ) {
       return res.status(404).json({
         error: "Manga not available"
       });
     }
 
     res.json(manga);
+
   } catch (error) {
+
     console.error("Details error:", error);
 
     res.status(500).json({
@@ -148,118 +172,226 @@ app.get("/api/source/comix/title/:id", async (req, res) => {
 // ===============================
 // CHAPTERS
 // ===============================
-app.get("/api/source/comix/title/:id/chapters", async (req, res) => {
-  try {
-    const id = req.params.id;
+app.get(
+  "/api/source/comix/title/:id/chapters",
+  async (req, res) => {
 
-    const url =
-      MDX +
-      "/manga/" +
-      encodeURIComponent(id) +
-      "/feed" +
-      "?translatedLanguage[]=en" +
-      "&order[chapter]=desc" +
-      "&order[volume]=desc" +
-      "&limit=100" +
-      "&includes[]=scanlation_group";
+    try {
 
-    const response = await fetch(url);
+      const id = req.params.id;
 
-    if (!response.ok) {
-      throw new Error("MangaDex returned " + response.status);
+      const url =
+        MDX +
+        "/manga/" +
+        encodeURIComponent(id) +
+        "/feed" +
+        "?translatedLanguage[]=en" +
+        "&order[chapter]=desc" +
+        "&order[volume]=desc" +
+        "&limit=100" +
+        "&includes[]=scanlation_group";
+
+      const response = await fetch(url, {
+        headers: MD_HEADERS
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          "MangaDex chapters returned " +
+          response.status
+        );
+      }
+
+      const data =
+        await response.json();
+
+      const chapters =
+        (data.data || []).map(chapter => {
+
+          const attributes =
+            chapter.attributes || {};
+
+          return {
+            id: chapter.id,
+
+            chapter:
+              attributes.chapter || "",
+
+            volume:
+              attributes.volume || "",
+
+            title:
+              attributes.title || "",
+
+            pages:
+              attributes.pages || 0,
+
+            published:
+              attributes.publishAt || "",
+
+            translatedLanguage:
+              attributes.translatedLanguage || "en",
+
+            source: SOURCE
+          };
+
+        });
+
+      res.json({
+        source: SOURCE,
+        mangaId: id,
+        count: chapters.length,
+        chapters
+      });
+
+    } catch (error) {
+
+      console.error("Chapters error:", error);
+
+      res.status(500).json({
+        error: "Could not load chapters",
+        message: error.message
+      });
     }
-
-    const data = await response.json();
-
-    const chapters = (data.data || []).map(chapter => {
-      const attributes = chapter.attributes || {};
-
-      return {
-        id: chapter.id,
-        chapter: attributes.chapter || "",
-        volume: attributes.volume || "",
-        title: attributes.title || "",
-        pages: attributes.pages || 0,
-        published: attributes.publishAt || "",
-        translatedLanguage: attributes.translatedLanguage || "en",
-        source: SOURCE
-      };
-    });
-
-    res.json({
-      source: SOURCE,
-      mangaId: id,
-      count: chapters.length,
-      chapters
-    });
-  } catch (error) {
-    console.error("Chapters error:", error);
-
-    res.status(500).json({
-      error: "Could not load chapters",
-      message: error.message
-    });
   }
-});
+);
 
 // ===============================
 // READER CHAPTER
 // ===============================
-app.get("/api/source/comix/chapter/:chapterId", async (req, res) => {
-  try {
-    const chapterId = req.params.chapterId;
+app.get(
+  "/api/source/comix/chapter/:chapterId",
+  async (req, res) => {
 
-    const response = await fetch(
-      MDX +
+    try {
+
+      const chapterId =
+        req.params.chapterId;
+
+      const url =
+        MDX +
         "/at-home/server/" +
-        encodeURIComponent(chapterId)
-    );
+        encodeURIComponent(chapterId);
 
-    if (!response.ok) {
-      throw new Error("MangaDex returned " + response.status);
-    }
-
-    const data = await response.json();
-
-    const baseUrl = data.baseUrl;
-    const chapter = data.chapter;
-
-    if (!baseUrl || !chapter || !chapter.hash) {
-      throw new Error("Invalid MangaDex chapter data");
-    }
-
-    const pages = (chapter.data || []).map(filename => {
-      return (
-        baseUrl +
-        "/data/" +
-        chapter.hash +
-        "/" +
-        filename
+      console.log(
+        "Loading MangaDex chapter:",
+        chapterId
       );
-    });
 
-    res.json({
-      source: SOURCE,
-      chapterId,
-      pages,
-      count: pages.length
-    });
-  } catch (error) {
-    console.error("Reader error:", error);
+      const response =
+        await fetch(url, {
+          headers: MD_HEADERS
+        });
 
-    res.status(500).json({
-      error: "Could not load chapter",
-      message: error.message
-    });
+      const responseText =
+        await response.text();
+
+      if (!response.ok) {
+
+        console.error(
+          "MangaDex reader error:",
+          response.status,
+          responseText
+        );
+
+        return res.status(502).json({
+          error: "MangaDex reader request failed",
+          status: response.status,
+          message:
+            "MangaDex did not provide the chapter pages."
+        });
+      }
+
+      let data;
+
+      try {
+
+        data =
+          JSON.parse(responseText);
+
+      } catch {
+
+        console.error(
+          "Invalid MangaDex response:",
+          responseText
+        );
+
+        return res.status(502).json({
+          error: "Invalid MangaDex reader response"
+        });
+      }
+
+      const baseUrl =
+        data.baseUrl;
+
+      const chapter =
+        data.chapter;
+
+      if (
+        !baseUrl ||
+        !chapter ||
+        !chapter.hash
+      ) {
+
+        console.error(
+          "Invalid chapter data:",
+          data
+        );
+
+        return res.status(502).json({
+          error: "MangaDex returned invalid chapter data"
+        });
+      }
+
+      const files =
+        chapter.dataSaver ||
+        chapter.data ||
+        [];
+
+      const pages =
+        files.map(filename => {
+
+          return (
+            baseUrl +
+            "/data/" +
+            chapter.hash +
+            "/" +
+            filename
+          );
+
+        });
+
+      res.json({
+        source: SOURCE,
+        chapterId,
+        pages,
+        count: pages.length
+      });
+
+    } catch (error) {
+
+      console.error(
+        "Reader error:",
+        error
+      );
+
+      res.status(500).json({
+        error: "Could not load chapter",
+        message: error.message
+      });
+    }
   }
-});
+);
 
 // ===============================
 // IMAGE PROXY
 // ===============================
 app.get("/api/image", async (req, res) => {
+
   try {
-    const imageUrl = req.query.url;
+
+    const imageUrl =
+      req.query.url;
 
     if (!imageUrl) {
       return res.status(400).json({
@@ -267,25 +399,51 @@ app.get("/api/image", async (req, res) => {
       });
     }
 
-    const response = await fetch(imageUrl);
+    const response =
+      await fetch(imageUrl, {
+        headers: {
+          "User-Agent": "Zyomira/1.0",
+          "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        }
+      });
 
     if (!response.ok) {
-      return res.status(response.status).send("Image request failed");
+      return res.status(response.status).send(
+        "Image request failed"
+      );
     }
 
     const contentType =
-      response.headers.get("content-type") || "image/jpeg";
+      response.headers.get("content-type") ||
+      "image/jpeg";
 
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer =
+      Buffer.from(
+        await response.arrayBuffer()
+      );
 
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader(
+      "Content-Type",
+      contentType
+    );
+
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=86400"
+    );
 
     res.send(buffer);
-  } catch (error) {
-    console.error("Image error:", error);
 
-    res.status(500).send("Could not load image");
+  } catch (error) {
+
+    console.error(
+      "Image error:",
+      error
+    );
+
+    res.status(500).send(
+      "Could not load image"
+    );
   }
 });
 
@@ -293,6 +451,7 @@ app.get("/api/image", async (req, res) => {
 // SOURCES
 // ===============================
 app.get("/api/sources", (req, res) => {
+
   res.json({
     sources: [
       {
@@ -303,15 +462,18 @@ app.get("/api/sources", (req, res) => {
       }
     ]
   });
+
 });
 
 // ===============================
 // REPOSITORY
 // ===============================
 app.get("/api/repository", (req, res) => {
+
   res.json({
     name: "Zyomira Sources",
     version: "1.0.0",
+
     sources: [
       {
         id: "mangadex",
@@ -321,39 +483,60 @@ app.get("/api/repository", (req, res) => {
       }
     ]
   });
+
 });
 
 // ===============================
 // NORMALIZE MANGA
 // ===============================
 function normalizeManga(item) {
-  if (!item || !item.id || !item.attributes) {
+
+  if (
+    !item ||
+    !item.id ||
+    !item.attributes
+  ) {
     return null;
   }
 
-  const attributes = item.attributes;
+  const attributes =
+    item.attributes;
 
-  if (attributes.contentRating !== "safe") {
+  if (
+    attributes.contentRating !== "safe"
+  ) {
     return null;
   }
 
   const title =
     attributes.title?.en ||
-    Object.values(attributes.title || {})[0] ||
+    Object.values(
+      attributes.title || {}
+    )[0] ||
     "Unknown title";
 
   const description =
     attributes.description?.en ||
-    Object.values(attributes.description || {})[0] ||
+    Object.values(
+      attributes.description || {}
+    )[0] ||
     "";
 
   let cover = "";
 
-  const coverArt = (item.relationships || []).find(
-    relationship => relationship.type === "cover_art"
-  );
+  const coverArt =
+    (item.relationships || [])
+      .find(
+        relationship =>
+          relationship.type ===
+          "cover_art"
+      );
 
-  if (coverArt && coverArt.attributes?.fileName) {
+  if (
+    coverArt &&
+    coverArt.attributes?.fileName
+  ) {
+
     cover =
       "https://uploads.mangadex.org/covers/" +
       item.id +
@@ -361,37 +544,49 @@ function normalizeManga(item) {
       coverArt.attributes.fileName;
   }
 
-  const authorRelationship = (item.relationships || []).find(
-    relationship => relationship.type === "author"
-  );
+  const authorRelationship =
+    (item.relationships || [])
+      .find(
+        relationship =>
+          relationship.type ===
+          "author"
+      );
 
-  const artistRelationship = (item.relationships || []).find(
-    relationship => relationship.type === "artist"
-  );
+  const artistRelationship =
+    (item.relationships || [])
+      .find(
+        relationship =>
+          relationship.type ===
+          "artist"
+      );
 
   return {
+
     id: item.id,
+
     title,
+
     description,
+
     synopsis: description,
+
     cover,
+
     thumbnail: cover,
 
     author:
-      authorRelationship?.attributes?.name ||
-      "",
+      authorRelationship
+        ?.attributes?.name || "",
 
     artist:
-      artistRelationship?.attributes?.name ||
-      "",
+      artistRelationship
+        ?.attributes?.name || "",
 
     status:
-      attributes.status ||
-      "",
+      attributes.status || "",
 
     year:
-      attributes.year ||
-      "",
+      attributes.year || "",
 
     type: "manga",
 
@@ -407,7 +602,9 @@ function normalizeManga(item) {
 // START SERVER
 // ===============================
 app.listen(PORT, () => {
+
   console.log(
     `Zyomira backend running on port ${PORT}`
   );
+
 });
